@@ -66,7 +66,7 @@ import {
   neighborLeafId,
   newFileTab,
   newPlanTab,
-  newTab,
+  newTab as createWorkspaceTab,
   newTerminalFile,
   newTerminalWorkspaceTab,
   nextTerminalTitle,
@@ -97,8 +97,8 @@ import {
   applyDockGridStyle,
   closeTerminalInDock,
   createProjectTerminal,
-  findProjectTerminal,
-  mapProjectTerminal,
+  findProjectTerminal as findOwnedProjectTerminal,
+  mapProjectTerminal as mapOwnedProjectTerminal,
   nextDockTerminalTitle,
   patchProjectTerminals,
   reorderDockTerminals,
@@ -206,16 +206,12 @@ import {
   rebasePath,
   resolveWorkspacePath,
 } from "./lib/paths";
-import { removeProjectData } from "./lib/projectData";
 import {
-  archiveProject,
-  forgetProject,
   lastProjectPath,
   loadArchivedProjects,
   loadRecents,
   looksLikeProject,
   normalizeProjectPath,
-  projectRailItems,
   rememberProject,
   sameProjectPath,
 } from "./lib/recents";
@@ -225,6 +221,7 @@ import {
   planWorkspaceTabClose,
   workspaceTabCwd,
   focusedWorkspaceTabCwd,
+  workspaceTabProjectId,
 } from "./lib/workspaceTabGroups";
 import { runSessionRemoval } from "./lib/sessionRemoval";
 import {
@@ -233,8 +230,8 @@ import {
   canReplaceSessionTitle,
   formatSessionTitle,
   sessionNeedsInput,
-  newDefaultSession,
-  newSession,
+  newDefaultSession as createDefaultSession,
+  newSession as createSession,
   sessionDisplayTitle,
   sessionWorkCwd,
   titleFromPrompt,
@@ -260,7 +257,7 @@ import {
   deleteSession,
   getSession,
   listLinkedSessions,
-  listSessionsByProject,
+  listSessionsByAgentProject,
   persistFingerprint,
   replaceInFlightSessions,
   saveWorkspaceSnapshot,
@@ -284,9 +281,19 @@ import {
   applyAgentProjectContext,
   loadAgentProjects,
   saveAgentProject,
+  migrateLegacyProjects,
+  ensureDefaultAgentProject,
+  deleteAgentProject,
   type AgentProject,
   type AgentProjectSubscription,
 } from "./lib/agentProjects";
+import {
+  legacyProjectInputs,
+  migrateLegacyProjectAppearance,
+  projectAppearanceKey,
+  loadProjectOrder,
+} from "./lib/projectIdentity";
+import { restoreProjectOwnership } from "./lib/appProjectState";
 import { ReminderNotices } from "./chrome/ReminderNotices";
 import { nextUnseenFinishedSessions } from "./lib/sessionDone";
 import {
@@ -601,6 +608,40 @@ export default function App({
       lastProjectPath() ??
       "~",
   );
+  const [activeProjectId, setActiveProjectId] = useState<string | undefined>(
+    () => windowTransfer?.activeProjectId ?? resumed?.activeProjectId,
+  );
+  const activeProjectIdRef = useRef(activeProjectId);
+  activeProjectIdRef.current = activeProjectId;
+  const [agentProjects, setAgentProjects] = useState<AgentProject[]>([]);
+  const agentProjectsRef = useRef(agentProjects);
+  agentProjectsRef.current = agentProjects;
+  const [projectsReady, setProjectsReady] = useState(false);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
+  const overviewIdsRef = useRef(new Set<string>(
+    windowTransfer?.projectOverviewIds ?? resumed?.projectOverviewIds ?? [],
+  ));
+  const [overviewVersion, setOverviewVersion] = useState(0);
+  const newSession = useCallback((...args: Parameters<typeof createSession>): Session => ({
+    ...createSession(...args),
+    projectId: activeProjectIdRef.current,
+  }), []);
+  const newDefaultSession = useCallback((...args: Parameters<typeof createDefaultSession>): Session => ({
+    ...createDefaultSession(...args),
+    projectId: activeProjectIdRef.current,
+  }), []);
+  const newTab = useCallback((...args: Parameters<typeof createWorkspaceTab>): WorkspaceTab => ({
+    ...createWorkspaceTab(...args),
+    projectId: activeProjectIdRef.current,
+  }), []);
+  const findProjectTerminal = useCallback((
+    docks: ProjectTerminal[], cwd: string, projectId = activeProjectIdRef.current,
+  ) => findOwnedProjectTerminal(docks, cwd, projectId), []);
+  const mapProjectTerminal = useCallback((
+    docks: ProjectTerminal[], cwd: string, update: (dock: ProjectTerminal) => ProjectTerminal,
+    projectId = activeProjectIdRef.current,
+  ) => mapOwnedProjectTerminal(docks, cwd, update, projectId), []);
   const [recents, setRecents] = useState(() =>
     resumed?.projectCwd && looksLikeProject(resumed.projectCwd)
       ? rememberProject(resumed.projectCwd)
@@ -608,8 +649,8 @@ export default function App({
   );
   const [seed] = useState(() => {
     const cwd = lastProjectPath() ?? "~";
-    const session = newDefaultSession(cwd);
-    const tab = newTab(session.id);
+    const session = createDefaultSession(cwd);
+    const tab = createWorkspaceTab(session.id);
     return { session, tab };
   });
   const [sessions, setSessions] = useState<Session[]>(
@@ -699,10 +740,7 @@ export default function App({
    * a new project must already know the listing has not arrived yet.
    */
   const [loadedProjects, setLoadedProjects] = useState<ReadonlySet<string>>(
-    () =>
-      bootHistoryCwd
-        ? new Set([normalizeProjectPath(bootHistoryCwd)])
-        : new Set(),
+    () => new Set(),
   );
   const loadedProjectsRef = useRef(loadedProjects);
   loadedProjectsRef.current = loadedProjects;

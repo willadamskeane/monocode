@@ -12,6 +12,7 @@ export const CONTINUE_PROMPT = "Continue from where you left off.";
 export type InFlightRef = {
   sessionId: string;
   cwd: string;
+  projectId?: string;
 };
 
 export type ResumedWorkspace = {
@@ -19,6 +20,7 @@ export type ResumedWorkspace = {
   tabs: WorkspaceTab[];
   activeTabId: string;
   projectCwd: string;
+  activeProjectId?: string;
   projectTerminals?: ProjectTerminalDock[];
   projectReturnMemory?: ProjectReturnMemory;
 };
@@ -48,7 +50,7 @@ export function inFlightRefs(
     if (!session || session.inboxAsk || seen.has(session.id)) return;
     if (!isInFlightSession(session) || !canResumeAfterQuit(session)) return;
     seen.add(session.id);
-    refs.push({ sessionId: session.id, cwd: session.cwd });
+    refs.push({ sessionId: session.id, cwd: session.cwd, ...(session.projectId ? { projectId: session.projectId } : {}) });
   };
 
   for (const tab of tabs) {
@@ -92,12 +94,13 @@ export function workspaceFromResumed(
 ): ResumedWorkspace | null {
   sessions = sessions.filter((session) => !session.inboxAsk);
   if (sessions.length === 0) return null;
-  const tabs = sessions.map((session) => newTab(session.id));
+  const tabs = sessions.map((session) => newTab(session.id, session.projectId));
   return {
     sessions,
     tabs,
     activeTabId: tabs[0].id,
     projectCwd: sessions[0].cwd,
+    ...(sessions[0].projectId ? { activeProjectId: sessions[0].projectId } : {}),
   };
 }
 

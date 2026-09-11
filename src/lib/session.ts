@@ -220,6 +220,7 @@ export const RUNTIME_MODE_HINT: Record<RuntimeMode, string> = {
 };
 
 export type Session = {
+  projectId?: string;
   /** Temporary Inbox conversation: shares the runtime, never saved as a session. */
   inboxAsk?: InboxAskContext;
   id: string;

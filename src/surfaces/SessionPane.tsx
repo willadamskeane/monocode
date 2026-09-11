@@ -59,6 +59,7 @@ import type { SessionFolderTarget } from "../lib/sessionFolders";
 
 type Props = {
   session: Session;
+  onDraftChange?: (sessionId: string, text: string) => void;
   reviewUndoLocked?: boolean;
   visible: boolean;
   focused: boolean;
@@ -141,6 +142,7 @@ type Props = {
 
 export const SessionPane = memo(function SessionPane({
   session,
+  onDraftChange,
   reviewUndoLocked = false,
   visible,
   focused,
@@ -298,6 +300,10 @@ export const SessionPane = memo(function SessionPane({
   const showDeckProjectPicker = isEmpty && !looksLikeProject(session.cwd);
   const dockComposer = !isEmpty || inSplit || !!session.inboxAsk;
   const draftRef = useRef<string | undefined>(undefined);
+  const updateDraft = useCallback((text: string) => {
+    draftRef.current = text;
+    onDraftChange?.(session.id, text);
+  }, [onDraftChange, session.id]);
   const composer = (
     <Composer
       enabled={visible}
@@ -327,9 +333,7 @@ export const SessionPane = memo(function SessionPane({
           ? undefined
           : session.composerSeed)
       }
-      onDraftChange={(text) => {
-        draftRef.current = text;
-      }}
+      onDraftChange={updateDraft}
       inboxCard={session.inboxCard}
       noteCard={session.noteCard}
       handoffCard={session.handoffCard}

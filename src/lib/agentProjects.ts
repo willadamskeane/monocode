@@ -31,6 +31,7 @@ export type AgentProject = {
   members: AgentProjectMember[];
   subscriptions: AgentProjectSubscription[];
   archived: boolean;
+  legacyDefault?: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -183,7 +184,7 @@ function validateProject(project: AgentProject): AgentProject {
 export function createAgentProject(
   cwd: string,
   name: string,
-  goal: string,
+  goal = "",
 ): AgentProject {
   return validateProject({
     id: crypto.randomUUID(),
@@ -226,10 +227,43 @@ export async function saveAgentProject(
   return saved;
 }
 
-export async function deleteAgentProject(id: string): Promise<void> {
+export async function deleteAgentProject(
+  id: string,
+  disposition: "keep" | "delete" = "keep",
+): Promise<void> {
   identifier(id);
-  await invoke("agent_projects_delete", { id });
+  if (disposition !== "keep" && disposition !== "delete")
+    throw new Error("Invalid chat disposition");
+  await invoke("agent_projects_delete", { id, disposition });
   changed();
+}
+
+export type LegacyProject = { cwd: string; name: string; archived?: boolean };
+
+export async function migrateLegacyProjects(
+  legacy: LegacyProject[],
+): Promise<AgentProject[]> {
+  const projects = await invoke<AgentProject[]>("agent_projects_migrate_legacy", {
+    legacy: legacy.map((project) => ({
+      ...project,
+      cwd: normalizeCwd(project.cwd),
+    })),
+  });
+  return projects.map(validateProject);
+}
+
+export async function ensureDefaultAgentProject(
+  cwd: string,
+  name?: string,
+): Promise<AgentProject> {
+  const project = validateProject(
+    await invoke<AgentProject>("agent_projects_ensure_default", {
+      cwd: normalizeCwd(cwd),
+      name,
+    }),
+  );
+  changed();
+  return project;
 }
 
 export async function deleteAgentProjectsForCwd(cwd: string): Promise<void> {
@@ -350,6 +384,7 @@ async function memberFindings(project: AgentProject, sessionId: string) {
           if (
             !session ||
             session.id !== member.sessionId ||
+            (session.projectId !== undefined && session.projectId !== project.id) ||
             normalizeCwd(session.cwd) !== project.cwd
           )
             return undefined;
@@ -387,6 +422,7 @@ export async function applyAgentProjectContext(
   text: string,
   sessionId: string,
   cwd: string,
+  projectId?: string,
 ): Promise<string> {
   identifier(sessionId);
   let repository: string;
@@ -397,20 +433,38 @@ export async function applyAgentProjectContext(
     return text;
   }
   const projects = await loadAgentProjects(repository);
+  let owner = projectId;
+  if (owner !== undefined) identifier(owner);
+  // Native membership remains authoritative for specialized draft agents.
+  // Ordinary persisted chats carry ownership separately from those roles.
+  if (
+    owner === undefined &&
+    !projects.some((project) =>
+      project.members.some((member) => member.sessionId === sessionId),
+    )
+  ) {
+    const session = await getSession(sessionId);
+    if (session && normalizeCwd(session.cwd) === repository)
+      owner = session.projectId;
+  }
   const matches = projects.filter(
     (project) =>
       !project.archived &&
-      project.members.some((member) => member.sessionId === sessionId),
+      (owner !== undefined
+        ? project.id === owner
+        : project.members.some((member) => member.sessionId === sessionId)),
   );
   // Fail closed if a corrupt response gives this session more than one project.
   if (matches.length !== 1) return text;
   const project = matches[0];
-  const member = project.members.find((item) => item.sessionId === sessionId)!;
+  const member = project.members.find((item) => item.sessionId === sessionId);
   const findings = await memberFindings(project, sessionId);
   const role =
-    member.role === "coordinator"
+    member?.role === "coordinator"
       ? "You are the project coordinator. Do not implement code changes yourself; delegate implementation using provider-native subagents when available; otherwise propose focused tasks for the user to launch as worker sessions. Maintain continuity across turns, track progress and unresolved work, and report outcomes honestly. This role guidance does not add provider capabilities or enforce permissions; permissions remain controlled by the session's runtime mode."
-      : "You are a project worker. Implement your assigned task, validate the changes, and report results and blockers to the coordinator.";
+      : member?.role === "worker"
+        ? "You are a project worker. Implement your assigned task, validate the changes, and report results and blockers to the coordinator."
+        : "This chat belongs to the project. Help with the user's request using the shared context; no coordinator or worker role is assigned.";
   const context = JSON.stringify(
     {
       name: project.name,

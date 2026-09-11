@@ -75,6 +75,7 @@ export type EditorPane = {
 export type SurfaceKind = "editor" | "terminal";
 
 export type WorkspaceTab = {
+  projectId?: string;
   kind: "session";
   id: string;
   layout: LayoutNode;
@@ -93,8 +94,9 @@ export function leaf(sessionId: string): LayoutNode {
   return { type: "leaf", id: sessionId };
 }
 
-export function newTab(sessionId: string): WorkspaceTab {
+export function newTab(sessionId: string, projectId?: string): WorkspaceTab {
   return {
+    ...(projectId ? { projectId } : {}),
     kind: "session",
     id: crypto.randomUUID(),
     layout: leaf(sessionId),

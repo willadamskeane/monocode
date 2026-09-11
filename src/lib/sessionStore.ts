@@ -19,6 +19,7 @@ import { HARNESSES, RUNTIME_MODES } from "./session";
 
 export type SessionSummary = {
   id: string;
+  projectId?: string;
   cwd: string;
   harness: HarnessId;
   model: string;
@@ -38,6 +39,7 @@ export type SessionSummary = {
 
 type SessionRecord = {
   id: string;
+  projectId?: string | null;
   cwd: string;
   harness: string;
   model: string;
@@ -57,6 +59,7 @@ type SessionRecord = {
 
 type SessionUpsertPayload = {
   id: string;
+  projectId?: string;
   cwd: string;
   harness: string;
   model: string;
@@ -92,6 +95,7 @@ function persistableMeta(
   const linkedWorkItem = sanitizeLinkedWorkItem(session.linkedWorkItem);
   return {
     id: session.id,
+    ...(session.projectId ? { projectId: session.projectId } : {}),
     cwd: normalizeProjectPath(session.cwd),
     harness: session.harness,
     model: session.model,
@@ -228,6 +232,27 @@ export async function listSessionsByProject(
 export async function listLinkedSessions(): Promise<SessionSummary[]> {
   const rows = await invoke<SessionSummary[]>("session_list_linked");
   return rows.map(normalizeSummary);
+}
+
+export async function listSessionsByAgentProject(
+  projectId: string,
+): Promise<SessionSummary[]> {
+  if (!isPersistableId(projectId)) throw new Error("Invalid project id");
+  const rows = await invoke<SessionSummary[]>("session_list_by_agent_project", {
+    projectId,
+  });
+  return rows.map(normalizeSummary);
+}
+
+export async function assignSessionProject(
+  sessionId: string,
+  projectId: string,
+): Promise<void> {
+  if (!isPersistableId(sessionId) || !isPersistableId(projectId))
+    throw new Error("Invalid session or project id");
+  await enqueueSessionWrite(sessionId, () =>
+    invoke<void>("session_assign_project", { sessionId, projectId }),
+  );
 }
 
 export type SessionSearchHit = {
@@ -522,6 +547,7 @@ function recordToSession(record: SessionRecord): Session {
   return {
     id: record.id,
     cwd: record.cwd,
+    ...(record.projectId ? { projectId: record.projectId } : {}),
     harness: asHarness(record.harness),
     model: record.model,
     modelSettings:

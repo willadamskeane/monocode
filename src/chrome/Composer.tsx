@@ -1379,6 +1379,7 @@ export function Composer({
                 const el = e.currentTarget;
                 resizeTextarea(el);
                 setDraft(el.value);
+                onDraftChange?.(el.value);
                 if (
                   sessionFolderSelected &&
                   !consumeSessionFolderCommand(el.value).matched
