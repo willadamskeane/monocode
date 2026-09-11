@@ -211,6 +211,7 @@ import {
   archiveProject,
   forgetProject,
   lastProjectPath,
+  loadArchivedProjects,
   loadRecents,
   looksLikeProject,
   normalizeProjectPath,
@@ -273,6 +274,19 @@ import { syncDockBadge } from "./lib/dockBadge";
 import { liveAgentsFromSessions } from "./lib/liveAgents";
 import { hiddenApprovalNotices } from "./lib/approvalToast";
 import { useSessionReminders } from "./hooks/useSessionReminders";
+import { useAgentProjectSubscriptions } from "./hooks/useAgentProjectSubscriptions";
+import { newAgentProjectSession } from "./lib/agentProjectSession";
+import {
+  harnessUnavailableHint,
+  isHarnessAvailable,
+} from "./lib/harness/availability";
+import {
+  applyAgentProjectContext,
+  loadAgentProjects,
+  saveAgentProject,
+  type AgentProject,
+  type AgentProjectSubscription,
+} from "./lib/agentProjects";
 import { ReminderNotices } from "./chrome/ReminderNotices";
 import { nextUnseenFinishedSessions } from "./lib/sessionDone";
 import {
@@ -338,6 +352,7 @@ import { InboxView } from "./surfaces/InboxView";
 import type { InboxSessionPortal } from "./surfaces/InboxDiscussionPanel";
 import { inboxAskKey, inboxAskPrompt } from "./lib/inboxAsk";
 import { NotesView } from "./surfaces/NotesView";
+import { AgentProjectsView } from "./surfaces/AgentProjectsView";
 import { inboxComposerCard, type InboxItem } from "./lib/githubTasks";
 import {
   linkedWorkItemFromInboxItem,
@@ -643,6 +658,7 @@ export default function App({
     useState<InboxSessionPortal | null>(null);
   const openingInboxSessions = useRef(new Map<string, Promise<string>>());
   const [notesViewOpen, setNotesViewOpen] = useState(false);
+  const [agentProjectsViewOpen, setAgentProjectsViewOpen] = useState(false);
   const notesEnabled = useSyncExternalStore(
     subscribeNotesEnabled,
     loadNotesEnabled,
@@ -714,6 +730,8 @@ export default function App({
   inboxViewOpenRef.current = inboxViewOpen;
   const notesViewOpenRef = useRef(notesViewOpen);
   notesViewOpenRef.current = notesViewOpen;
+  const agentProjectsViewOpenRef = useRef(agentProjectsViewOpen);
+  agentProjectsViewOpenRef.current = agentProjectsViewOpen;
   const settingsOpenRef = useRef(settingsOpen);
   settingsOpenRef.current = settingsOpen;
   const sessionNavigationIdsRef = useRef<readonly string[]>([]);
@@ -1383,9 +1401,11 @@ export default function App({
   }, [sessions, tabs, persistSession, liveAgentsEnabled]);
 
   const activateTab = useCallback((id: string, paneId?: string) => {
+    setAgentProjectsViewOpen(false);
     const tab = tabsRef.current.find((entry) => entry.id === id);
     const nextFocusedId =
-      tab && paneId &&
+      tab &&
+      paneId &&
       (leafIds(tab.layout).includes(paneId) ||
         tab.editorPanes.some((entry) => entry.id === paneId) ||
         (tab.terminalPanes ?? []).some((entry) => entry.id === paneId))
@@ -1473,6 +1493,7 @@ export default function App({
   }, []);
 
   const onNew = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
@@ -1495,6 +1516,7 @@ export default function App({
   const onStartInboxItem = useCallback(
     async (item: InboxItem, body?: string) => {
       const start = (description?: string) => {
+        setAgentProjectsViewOpen(false);
         setInboxViewOpen(false);
         setNotesViewOpen(false);
         setSidebarTab("sessions");
@@ -1549,6 +1571,7 @@ export default function App({
   const onAddNoteToChat = useCallback(
     (card: NoteComposerCard) => {
       if (!card.id) return;
+      setAgentProjectsViewOpen(false);
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
@@ -2743,6 +2766,7 @@ export default function App({
 
   const onSelectHistorySession = useCallback(
     async (sessionId: string) => {
+      setAgentProjectsViewOpen(false);
       if (focusOpenSession(sessionId)) return;
       const session = await ensureOpenSession(sessionId);
       if (!session || session.inboxAsk) return;
@@ -2797,7 +2821,9 @@ export default function App({
   const sessionReminders = useSessionReminders(
     openReminderSession,
     ensureReminderSessionsSaved,
-    sessions.filter((session) => !session.inboxAsk).map((session) => session.id),
+    sessions
+      .filter((session) => !session.inboxAsk)
+      .map((session) => session.id),
   );
 
   const onPlaceSessionOnPane = useCallback(
@@ -3087,6 +3113,7 @@ export default function App({
             searchViewOpenRef.current ||
             inboxViewOpenRef.current ||
             notesViewOpenRef.current ||
+            agentProjectsViewOpenRef.current ||
             settingsOpenRef.current ||
             filePickerOpenRef.current ||
             whatsNewVersionRef.current,
@@ -3282,6 +3309,7 @@ export default function App({
 
   const onSelectProject = useCallback(
     (path: string) => {
+      setAgentProjectsViewOpen(false);
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
@@ -3406,7 +3434,12 @@ export default function App({
           }
           lastPersisted.current.delete(session.id);
         }
-        void removeProjectData(normalized);
+        void removeProjectData(normalized).catch((error: unknown) => {
+          void message(String(error), {
+            title: "Remove project",
+            kind: "error",
+          });
+        });
       } else {
         for (const session of projectSessions) {
           if (session.busy) continue;
@@ -3818,11 +3851,18 @@ export default function App({
         void (async () => {
           try {
             const prepared = await prepareAttachments(attachments);
-            const prompt = await preparePrompt(harnessText, {
+            const preparedPrompt = await preparePrompt(harnessText, {
               harness: current.harness,
               sessionId,
               cwd: workCwd,
             });
+            const prompt = rawCommand
+              ? preparedPrompt
+              : await applyAgentProjectContext(
+                  preparedPrompt,
+                  sessionId,
+                  current.cwd,
+                );
             await steerHarnessTurn({
               harness: current.harness,
               sessionId,
@@ -4077,7 +4117,7 @@ export default function App({
         let buildSucceeded = false;
         try {
           const prepared = await prepareAttachments(attachments);
-          const prompt =
+          const preparedPrompt =
             intent === "build" && approvedPlan
               ? buildPlanPrompt(approvedPlan.text)
               : await preparePrompt(harnessText, {
@@ -4085,6 +4125,13 @@ export default function App({
                   sessionId,
                   cwd: workCwd,
                 });
+          const prompt = rawCommand
+            ? preparedPrompt
+            : await applyAgentProjectContext(
+                preparedPrompt,
+                sessionId,
+                current.cwd,
+              );
           const turnPrompt =
             intent === "plan" && !rawCommand ? planTurnPrompt(prompt) : prompt;
           const earlier = queuedHandoff
@@ -4208,6 +4255,119 @@ export default function App({
       })();
     },
     [enqueueHarnessEvent, flushHarnessEvents],
+  );
+
+  const startingProjectAgents = useRef(new Set<string>());
+  const startProjectAgent = useCallback(
+    async (
+      project: AgentProject,
+      role: "coordinator" | "worker",
+      prompt: string,
+      title: string,
+      subscription?: AgentProjectSubscription,
+    ) => {
+      if (startingProjectAgents.current.has(project.id)) {
+        throw new Error(
+          "Another agent is starting in this project. Try again.",
+        );
+      }
+      startingProjectAgents.current.add(project.id);
+      try {
+        const latest = (await loadAgentProjects(project.cwd)).find(
+          (entry) => entry.id === project.id,
+        );
+        if (!latest || latest.archived) {
+          throw new Error("This project was deleted or archived.");
+        }
+        if (subscription) {
+          if (
+            loadArchivedProjects().some((entry) =>
+              sameProjectPath(entry.path, latest.cwd),
+            )
+          )
+            return;
+          if (
+            !latest.subscriptions.some(
+              (entry) => entry.id === subscription.id && entry.enabled,
+            )
+          )
+            return;
+          if (
+            latest.members.some((member) =>
+              sessionsRef.current.some(
+                (session) => session.id === member.sessionId && session.busy,
+              ),
+            )
+          ) {
+            throw new Error(
+              "Scheduled run skipped: a project agent is still running. The next interval will try again.",
+            );
+          }
+        }
+        const coordinator = latest.members.find(
+          (member) => member.role === "coordinator",
+        );
+        if (role === "coordinator" && coordinator) {
+          const existing = await ensureOpenSession(coordinator.sessionId);
+          if (existing && sameProjectPath(existing.cwd, latest.cwd)) {
+            await onSelectHistorySession(existing.id);
+            return;
+          }
+        }
+        const session = newAgentProjectSession(latest, prompt, title);
+        if (subscription) {
+          session.composerSeed = undefined;
+          await probeHarnessAvailability();
+          if (!isHarnessAvailable(session.harness)) {
+            throw new Error(harnessUnavailableHint(session.harness));
+          }
+        }
+        await saveAgentProject({
+          ...latest,
+          members: [
+            ...latest.members.filter(
+              (member) =>
+                role !== "coordinator" || member.role !== "coordinator",
+            ),
+            { sessionId: session.id, role, title: session.title },
+          ],
+        });
+        const tab = newTab(session.id);
+        sessionsRef.current = [...sessionsRef.current, session];
+        setSessions(sessionsRef.current);
+        appendTab(tab, session.cwd);
+        if (subscription) {
+          // Each occurrence gets its own supervised session; never steer an
+          // existing coordinator or inherit a user's full-access permissions.
+          onSubmit(session.id, prompt, [], { followUpBehavior: "queue" });
+        } else {
+          setAgentProjectsViewOpen(false);
+          setProjectCwd(session.cwd);
+          setRecents(rememberProject(session.cwd));
+          setSidebarTab("sessions");
+          setActiveTabId(tab.id);
+          setComposerFocused(true);
+        }
+      } finally {
+        startingProjectAgents.current.delete(project.id);
+      }
+    },
+    [appendTab, ensureOpenSession, onSelectHistorySession, onSubmit],
+  );
+
+  const runProjectSubscription = useCallback(
+    (project: AgentProject, subscription: AgentProjectSubscription) =>
+      startProjectAgent(
+        project,
+        "worker",
+        `Scheduled project task: ${subscription.name}\n\n${subscription.prompt}`,
+        `${project.name} · ${subscription.name}`,
+        subscription,
+      ),
+    [startProjectAgent],
+  );
+  const projectSubscriptions = useAgentProjectSubscriptions(
+    runProjectSubscription,
   );
 
   const onUpdatePlan = useCallback(
@@ -4736,13 +4896,15 @@ export default function App({
   const onQuestionInteraction = useCallback(
     (sessionId: string, requestId: number) => {
       const session = sessionsRef.current.find((s) => s.id === sessionId);
-      if (session) keepHarnessQuestionOpen(session.harness, sessionId, requestId);
+      if (session)
+        keepHarnessQuestionOpen(session.harness, sessionId, requestId);
     },
     [],
   );
 
   const onOpenApprovalSession = useCallback(
     (sessionId: string) => {
+      setAgentProjectsViewOpen(false);
       if (!focusOpenSession(sessionId)) {
         void onSelectHistorySession(sessionId);
       }
@@ -4857,6 +5019,7 @@ export default function App({
   }, []);
 
   const onGoToFile = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
@@ -4864,6 +5027,7 @@ export default function App({
   }, []);
 
   const onFindInProject = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
@@ -4873,6 +5037,7 @@ export default function App({
   }, []);
 
   const onOpenSearch = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setFilePickerOpen(false);
     setSettingsOpen(false);
     setInboxViewOpen(false);
@@ -4886,6 +5051,7 @@ export default function App({
   }, []);
 
   const onOpenInbox = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setFilePickerOpen(false);
     setSettingsOpen(false);
     setSearchViewOpen(false);
@@ -4895,6 +5061,7 @@ export default function App({
   }, []);
 
   const onOpenLinkedWorkItem = useCallback((item: LinkedWorkItem) => {
+    setAgentProjectsViewOpen(false);
     setFilePickerOpen(false);
     setSettingsOpen(false);
     setSearchViewOpen(false);
@@ -4920,6 +5087,7 @@ export default function App({
 
   const onOpenNotes = useCallback(() => {
     if (!loadNotesEnabled()) return;
+    setAgentProjectsViewOpen(false);
     setFilePickerOpen(false);
     setSettingsOpen(false);
     setSearchViewOpen(false);
@@ -4931,8 +5099,18 @@ export default function App({
     setNotesViewOpen(false);
   }, []);
 
+  const onOpenAgentProjects = useCallback(() => {
+    setFilePickerOpen(false);
+    setSettingsOpen(false);
+    setSearchViewOpen(false);
+    setInboxViewOpen(false);
+    setNotesViewOpen(false);
+    setAgentProjectsViewOpen(true);
+  }, []);
+
   const openSettings = useCallback(
     (section?: SettingsSectionId, anchor?: SettingsAnchor) => {
+      setAgentProjectsViewOpen(false);
       setFilePickerOpen(false);
       setSearchViewOpen(false);
       setInboxViewOpen(false);
@@ -4972,6 +5150,10 @@ export default function App({
   );
 
   const onRailBack = useCallback(() => {
+    if (agentProjectsViewOpen) {
+      setAgentProjectsViewOpen(false);
+      return;
+    }
     if (settingsOpen) {
       setSettingsOpen(false);
       return;
@@ -4989,9 +5171,17 @@ export default function App({
       return;
     }
     onVisitBack();
-  }, [onVisitBack, searchViewOpen, settingsOpen, inboxViewOpen, notesViewOpen]);
+  }, [
+    onVisitBack,
+    searchViewOpen,
+    settingsOpen,
+    inboxViewOpen,
+    notesViewOpen,
+    agentProjectsViewOpen,
+  ]);
 
   const onRailForward = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setSearchViewOpen(false);
     setSettingsOpen(false);
     setInboxViewOpen(false);
@@ -5178,6 +5368,7 @@ export default function App({
             searchViewOpenRef.current ||
             inboxViewOpenRef.current ||
             notesViewOpenRef.current ||
+            agentProjectsViewOpenRef.current ||
             settingsOpenRef.current ||
             filePickerOpenRef.current ||
             Boolean(whatsNewVersionRef.current);
@@ -5252,6 +5443,7 @@ export default function App({
         !searchViewOpenRef.current &&
         !inboxViewOpenRef.current &&
         !notesViewOpenRef.current &&
+        !agentProjectsViewOpenRef.current &&
         handleEditorFindKey(e)
       ) {
         e.stopPropagation();
@@ -5494,7 +5686,8 @@ export default function App({
           searchViewOpen ||
           settingsOpen ||
           inboxViewOpen ||
-          notesViewOpen
+          notesViewOpen ||
+          agentProjectsViewOpen
         }
         canGoForward={tabVisitNav.canForward}
         onGoBack={onRailBack}
@@ -5525,6 +5718,8 @@ export default function App({
         onOpenInbox={onOpenInbox}
         onOpenInboxItem={onOpenLinkedWorkItem}
         onOpenNotes={notesEnabled ? onOpenNotes : undefined}
+        onOpenAgentProjects={onOpenAgentProjects}
+        agentProjectsActive={agentProjectsViewOpen}
         onGoToFile={onGoToFile}
         searchActive={searchViewOpen}
         inboxActive={inboxViewOpen}
@@ -5544,20 +5739,44 @@ export default function App({
       />
 
       <div className="body-glass flex min-h-0 min-w-0 flex-1 flex-col">
+        {projectSubscriptions.error ? (
+          <div
+            role="alert"
+            className="flex items-center gap-3 border-b border-content/10 bg-background-base px-4 py-2 text-xs text-content/70"
+          >
+            <span className="min-w-0 flex-1">{projectSubscriptions.error}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded px-2 py-1 hover:bg-content/8"
+              onClick={projectSubscriptions.dismissError}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         <div
           className={
-            searchViewOpen || settingsOpen || inboxViewOpen || notesViewOpen
+            searchViewOpen ||
+            settingsOpen ||
+            inboxViewOpen ||
+            notesViewOpen ||
+            agentProjectsViewOpen
               ? "hidden"
               : "flex min-h-0 min-w-0 flex-1 flex-col"
           }
           aria-hidden={
-            searchViewOpen || settingsOpen || inboxViewOpen || notesViewOpen
+            searchViewOpen ||
+            settingsOpen ||
+            inboxViewOpen ||
+            notesViewOpen ||
+            agentProjectsViewOpen
           }
           inert={
             searchViewOpen ||
             settingsOpen ||
             inboxViewOpen ||
             notesViewOpen ||
+            agentProjectsViewOpen ||
             undefined
           }
         >
@@ -5772,6 +5991,36 @@ export default function App({
             onOpenIntegrations={onOpenInboxIntegrations}
           />
         ) : null}
+        {agentProjectsViewOpen ? (
+          <AgentProjectsView
+            cwd={projectCwd}
+            besideRail={projectRailOpen}
+            onClose={() => setAgentProjectsViewOpen(false)}
+            onToggleSidebar={onToggleSidebar}
+            sessions={[...history, ...openProjectSessions]}
+            busySessionIds={busySessionIds}
+            onOpenSession={(id) => {
+              void ensureOpenSession(id)
+                .then(async (session) => {
+                  if (session) {
+                    await onSelectHistorySession(id);
+                  } else {
+                    await message(
+                      "This conversation is no longer available. Start the coordinator again, or delegate a new task.",
+                      { title: "Projects" },
+                    );
+                  }
+                })
+                .catch((error: unknown) => {
+                  void message(String(error), {
+                    title: "Projects",
+                    kind: "error",
+                  });
+                });
+            }}
+            onStartSession={startProjectAgent}
+          />
+        ) : null}
         {notesViewOpen ? (
           <NotesView
             besideRail={projectRailOpen}
@@ -5801,6 +6050,7 @@ export default function App({
         {searchViewOpen ||
         inboxViewOpen ||
         notesViewOpen ||
+        agentProjectsViewOpen ||
         settingsOpen ? null : (
           <UsageFooter
             providers={usageProviders}

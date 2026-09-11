@@ -602,6 +602,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          ON sessions (id) WHERE inbox_ask IS NOT NULL;",
     )?;
     crate::notes::ensure_notes_table(conn)?;
+    crate::agent_projects::ensure_agent_projects_table(conn)?;
     crate::reminders::ensure_table(conn)?;
     Ok(())
 }

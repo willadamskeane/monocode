@@ -1,6 +1,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Archive,
+  Bot,
   Check,
   ChevronDown,
   ChevronRight,
@@ -242,6 +243,8 @@ type Props = {
   onOpenInbox?: () => void;
   onOpenInboxItem?: (item: LinkedWorkItem) => void;
   onOpenNotes?: () => void;
+  onOpenAgentProjects?: () => void;
+  agentProjectsActive?: boolean;
   onGoToFile?: () => void;
   searchActive?: boolean;
   inboxActive?: boolean;
@@ -319,6 +322,8 @@ function SidebarComponent({
   onOpenInbox,
   onOpenInboxItem,
   onOpenNotes,
+  onOpenAgentProjects,
+  agentProjectsActive = false,
   onGoToFile,
   searchActive = false,
   inboxActive = false,
@@ -537,6 +542,7 @@ function SidebarComponent({
     !searchActive &&
     !inboxActive &&
     !notesActive &&
+    !agentProjectsActive &&
     !settingsOpen &&
     inProject;
   const gitStatuses = useGitFileStatuses(gitRoot, open && tab === "files");
@@ -1193,6 +1199,8 @@ function SidebarComponent({
               onSearch={onSearch}
               onOpenInbox={onOpenInbox}
               onOpenNotes={notesEnabled ? onOpenNotes : undefined}
+              onOpenAgentProjects={onOpenAgentProjects}
+              agentProjectsActive={agentProjectsActive}
               searchActive={searchActive}
               inboxActive={inboxActive}
               notesActive={notesActive}
@@ -1663,6 +1671,8 @@ function SidebarComponent({
           inboxActive={inboxActive}
           notesEnabled={notesEnabled}
           onOpenNotes={onOpenNotes}
+          onOpenAgentProjects={onOpenAgentProjects}
+          agentProjectsActive={agentProjectsActive}
           notesActive={notesActive}
           onTogglePanel={onToggleProjectRail}
           onSelectProject={onSelectProject}
@@ -1695,6 +1705,8 @@ function SidebarProjectPicker({
   onSearch,
   onOpenInbox,
   onOpenNotes,
+  onOpenAgentProjects,
+  agentProjectsActive = false,
   searchActive = false,
   inboxActive = false,
   notesActive = false,
@@ -1709,6 +1721,8 @@ function SidebarProjectPicker({
   onSearch?: () => void;
   onOpenInbox?: () => void;
   onOpenNotes?: () => void;
+  onOpenAgentProjects?: () => void;
+  agentProjectsActive?: boolean;
   searchActive?: boolean;
   inboxActive?: boolean;
   notesActive?: boolean;
@@ -1985,6 +1999,15 @@ function SidebarProjectPicker({
         {onOpenNotes ? (
           <IconButton label="Notes" active={notesActive} onClick={onOpenNotes}>
             <StickyNote className="size-3.5" strokeWidth={1.75} />
+          </IconButton>
+        ) : null}
+        {onOpenAgentProjects ? (
+          <IconButton
+            label="Projects"
+            active={agentProjectsActive}
+            onClick={onOpenAgentProjects}
+          >
+            <Bot className="size-3.5" strokeWidth={1.75} />
           </IconButton>
         ) : null}
       </div>

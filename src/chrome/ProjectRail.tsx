@@ -1,5 +1,6 @@
 import {
   Archive,
+  Bot,
   Check,
   ChevronDown,
   ChevronUp,
@@ -120,6 +121,8 @@ type Props = {
   inboxActive?: boolean;
   notesEnabled?: boolean;
   onOpenNotes?: () => void;
+  onOpenAgentProjects?: () => void;
+  agentProjectsActive?: boolean;
   notesActive?: boolean;
   onTogglePanel?: () => void;
   onSelectProject: (path: string) => void;
@@ -153,6 +156,8 @@ export function ProjectRail({
   inboxActive = false,
   notesEnabled = true,
   onOpenNotes,
+  onOpenAgentProjects,
+  agentProjectsActive = false,
   notesActive = false,
   onTogglePanel,
   onSelectProject,
@@ -423,6 +428,14 @@ export function ProjectRail({
                 ariaLabel="Notes"
               />
             ) : null}
+            {onOpenAgentProjects ? (
+              <RailAction
+                label="Projects"
+                icon={Bot}
+                onClick={onOpenAgentProjects}
+                active={agentProjectsActive}
+              />
+            ) : null}
           </div>
 
           <div
@@ -440,7 +453,12 @@ export function ProjectRail({
                 busy={busy}
                 sortable={pinnedSortable}
                 pinned
-                searchActive={searchActive || inboxActive || notesActive}
+                searchActive={
+                  searchActive ||
+                  inboxActive ||
+                  notesActive ||
+                  agentProjectsActive
+                }
                 onSelect={onSelectProject}
                 onTogglePin={onTogglePin}
                 onContextMenu={onProjectContextMenu}
@@ -462,7 +480,12 @@ export function ProjectRail({
               busy={busy}
               sortable={projectSortable}
               pinned={false}
-              searchActive={searchActive || inboxActive || notesActive}
+              searchActive={
+                searchActive ||
+                inboxActive ||
+                notesActive ||
+                agentProjectsActive
+              }
               onSelect={onSelectProject}
               onTogglePin={onTogglePin}
               onContextMenu={onProjectContextMenu}
