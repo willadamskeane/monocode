@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getSession } from "./sessionStore";
+import type { Session } from "./session";
 import {
   applyAgentProjectContext,
   claimDueAgentProjectSubscriptions,
@@ -15,6 +17,7 @@ import {
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+vi.mock("./sessionStore", () => ({ getSession: vi.fn() }));
 const native = vi.mocked(invoke);
 
 function project(overrides: Partial<AgentProject> = {}): AgentProject {
@@ -66,6 +69,34 @@ describe("agent project persistence", () => {
       cwd: undefined,
     });
     expect(native).toHaveBeenCalledTimes(2);
+  });
+
+  it("matches existing Windows drive-root, Unicode and UNC path identities", async () => {
+    for (const [stored, requested, expected] of [
+      ["C:/", "C:", "c:/"],
+      ["C:\\RÉPO\\", "c:/répo", "c:/répo"],
+      [
+        "\\\\Server\\Share\\Folder",
+        "//server/share/folder/",
+        "//server/share/folder",
+      ],
+    ]) {
+      native.mockResolvedValueOnce([project({ cwd: stored })]);
+      expect((await loadAgentProjects(requested))[0].cwd).toBe(expected);
+    }
+  });
+
+  it("reports the membership limit without silently evicting existing members", async () => {
+    const input = project({
+      members: Array.from({ length: 65 }, (_, index) => ({
+        sessionId: `worker-${index}`,
+        role: "worker",
+        title: "Worker",
+      })),
+    });
+    await expect(saveAgentProject(input)).rejects.toThrow("64 members");
+    expect(input.members).toHaveLength(65);
+    expect(native).not.toHaveBeenCalled();
   });
 
   it("passes CAS revisions to native and surfaces conflicts rather than retrying", async () => {
@@ -135,6 +166,171 @@ describe("agent project persistence", () => {
 });
 
 describe("fresh project prompt context", () => {
+  function savedSession(id: string, overrides: Partial<Session> = {}): Session {
+    return {
+      id,
+      cwd: "/repo",
+      harness: "codex",
+      model: "default",
+      modelSettings: {},
+      runtimeMode: "supervised",
+      title: "Worker",
+      blocks: [
+        {
+          id: "user",
+          role: "user",
+          text: "Task",
+          startedAt: 100,
+          durationMs: 10,
+        },
+        { id: "assistant", role: "assistant", text: "Implemented and tested" },
+      ],
+      ...overrides,
+    };
+  }
+
+  it("freshly shares completed same-repository member findings, never the current or foreign chat", async () => {
+    const members: AgentProject["members"] = [
+      ...project().members,
+      { sessionId: "worker", role: "worker", title: "Implementation" },
+      { sessionId: "foreign", role: "worker", title: "Foreign" },
+      { sessionId: "missing", role: "worker", title: "Deleted" },
+    ];
+    native.mockResolvedValue([project({ members })]);
+    vi.mocked(getSession).mockImplementation(async (id) =>
+      id === "missing"
+        ? null
+        : savedSession(
+            id,
+            id === "foreign" ? { cwd: "/other" } : { cwd: "/repo/./" },
+          ),
+    );
+    const first = await applyAgentProjectContext(
+      "Continue",
+      "coordinator",
+      "/repo",
+    );
+    expect(first).toContain("Implemented and tested");
+    expect(first).toContain('"sessionId": "worker"');
+    expect(first).not.toContain('"sessionId": "foreign"');
+    expect(getSession).not.toHaveBeenCalledWith("coordinator");
+    vi.mocked(getSession).mockResolvedValue(
+      savedSession("worker", {
+        blocks: [
+          {
+            id: "user",
+            role: "user",
+            text: "Task",
+            startedAt: 200,
+            durationMs: 10,
+          },
+          { id: "assistant", role: "assistant", text: "Fresh worker results" },
+        ],
+      }),
+    );
+    const next = await applyAgentProjectContext(
+      "Continue",
+      "coordinator",
+      "/repo",
+    );
+    expect(next).toContain("Fresh worker results");
+    expect(next).not.toContain("Implemented and tested");
+  });
+
+  it("uses the previous completed turn instead of unfinished text, tools or reasoning", async () => {
+    native.mockResolvedValue([
+      project({
+        members: [
+          ...project().members,
+          { sessionId: "worker", role: "worker", title: "Worker" },
+        ],
+      }),
+    ]);
+    const session = savedSession("worker");
+    session.blocks.push(
+      { id: "next-user", role: "user", text: "Next task", startedAt: 200 },
+      { id: "next-assistant", role: "assistant", text: "INCOMPLETE" },
+      { id: "tool", role: "tool", text: "PRIVATE TOOL" },
+      { id: "reasoning", role: "reasoning", text: "PRIVATE REASONING" },
+    );
+    vi.mocked(getSession).mockResolvedValue(session);
+    const prompt = await applyAgentProjectContext(
+      "Continue",
+      "coordinator",
+      "/repo",
+    );
+    expect(prompt).toContain("Implemented and tested");
+    for (const excluded of ["INCOMPLETE", "PRIVATE TOOL", "PRIVATE REASONING"])
+      expect(prompt).not.toContain(excluded);
+  });
+
+  it("bounds findings and prefers the most recent completed turns", async () => {
+    const members: AgentProject["members"] = [...project().members];
+    for (let index = 0; index < 12; index++)
+      members.push({
+        sessionId: `worker-${index}`,
+        role: "worker",
+        title: `Worker ${index}`,
+      });
+    native.mockResolvedValue([project({ members })]);
+    vi.mocked(getSession).mockImplementation(async (id) =>
+      savedSession(id, {
+        blocks: [
+          {
+            id: "user",
+            role: "user",
+            text: "Task",
+            startedAt: Number(id.split("-")[1]) * 100,
+            durationMs: 10,
+          },
+          { id: "assistant", role: "assistant", text: "é".repeat(10_000) },
+        ],
+      }),
+    );
+    const prompt = await applyAgentProjectContext(
+      "Continue",
+      "coordinator",
+      "/repo",
+    );
+    const context = JSON.parse(
+      prompt.slice(prompt.indexOf("{"), prompt.lastIndexOf("}") + 1),
+    );
+    expect(context.memberFindings.length).toBeLessThanOrEqual(8);
+    expect(context.memberFindings[0].sessionId).toBe("worker-11");
+    expect(
+      new TextEncoder().encode(JSON.stringify(context.memberFindings)).length,
+    ).toBeLessThanOrEqual(32_000);
+    for (const finding of context.memberFindings)
+      expect(new TextEncoder().encode(finding.text).length).toBeLessThanOrEqual(
+        4000,
+      );
+  });
+
+  it("ignores unavailable chats and transcripts lacking a completed turn", async () => {
+    native.mockResolvedValue([
+      project({
+        members: [
+          ...project().members,
+          { sessionId: "worker", role: "worker", title: "Worker" },
+        ],
+      }),
+    ]);
+    vi.mocked(getSession).mockRejectedValueOnce(
+      new Error("Session unavailable"),
+    );
+    expect(
+      await applyAgentProjectContext("Continue", "coordinator", "/repo"),
+    ).toContain('"memberFindings": []');
+    vi.mocked(getSession).mockResolvedValueOnce(
+      savedSession("worker", {
+        blocks: [{ id: "assistant", role: "assistant", text: "UNMARKED" }],
+      }),
+    );
+    expect(
+      await applyAgentProjectContext("Continue", "coordinator", "/repo"),
+    ).not.toContain("UNMARKED");
+  });
+
   it("injects only exact membership and repository context with coordinator responsibilities", async () => {
     native.mockResolvedValue([
       project(),
@@ -153,6 +349,16 @@ describe("fresh project prompt context", () => {
       "/repo/",
     );
     expect(prompt).toContain("provider-native subagents when available");
+    expect(prompt).toContain("Do not implement code changes yourself");
+    expect(prompt).toContain("tasks for the user to launch as worker sessions");
+    expect(prompt).toContain(
+      "does not add provider capabilities or enforce permissions",
+    );
+    expect(prompt).toContain(
+      "permissions remain controlled by the session's runtime mode",
+    );
+    expect(prompt).not.toContain("execution remains supervised");
+    expect(prompt).not.toContain("local, supervised project");
     expect(prompt).toContain("Maintain continuity");
     expect(prompt).toContain("Shared design");
     expect(prompt).toContain(
@@ -216,6 +422,18 @@ describe("fresh project prompt context", () => {
       );
     }
     expect(native).not.toHaveBeenCalled();
+  });
+
+  it("leaves ordinary sessions unchanged when no project records exist", async () => {
+    native.mockResolvedValueOnce([]);
+    expect(
+      await applyAgentProjectContext(
+        "  ordinary request\n",
+        "ordinary",
+        "/repo",
+      ),
+    ).toBe("  ordinary request\n");
+    expect(getSession).not.toHaveBeenCalled();
   });
 });
 

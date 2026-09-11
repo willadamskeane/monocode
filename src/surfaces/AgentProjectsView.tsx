@@ -67,6 +67,18 @@ const topDialog = () => {
   const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"]');
   return dialogs[dialogs.length - 1];
 };
+type RecoverableDraft = {
+  draft: AgentProject;
+  baseline: AgentProject;
+  task: string;
+  taskTitle: string;
+  schedule: AgentProjectSubscription | null;
+  scheduleChanged: boolean;
+};
+// Keep unsaved work recoverable when app-level navigation unmounts this view.
+const projectDrafts = new Map<string, RecoverableDraft>();
+const draftKey = (project: Pick<AgentProject, "cwd" | "id">) =>
+  `${project.cwd}\0${project.id}`;
 
 function ProjectModal(props: ComponentProps<typeof Modal>) {
   const dialogRef = useRef<HTMLElement | null>(null);
@@ -145,9 +157,20 @@ export function AgentProjectsView({
   } | null>(null);
   const dirty = useRef(false);
   const busy = useRef(false);
+  const creatingDirty = useRef(false);
+  creatingDirty.current = creating && !!(name.trim() || goal.trim());
+  const hasRepository =
+    cwd.startsWith("/") ||
+    cwd.startsWith("\\\\") ||
+    /^[A-Za-z]:(?:[\\/]|$)/.test(cwd);
   const request = useRef(0);
   const refresh = useCallback(async () => {
     const id = ++request.current;
+    if (!hasRepository) {
+      setProjects([]);
+      setLoading(false);
+      return;
+    }
     try {
       const records = await loadAgentProjects(cwd);
       if (id !== request.current) return;
@@ -157,7 +180,7 @@ export function AgentProjectsView({
     } finally {
       if (id === request.current) setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, hasRepository]);
   useEffect(() => {
     setLoading(true);
     setProjects([]);
@@ -180,6 +203,8 @@ export function AgentProjectsView({
         text: "Your saved project will not change. Unsaved edits will be discarded.",
         action: () => {
           dirty.current = false;
+          const current = projects.find((item) => item.id === selectedId);
+          if (current) projectDrafts.delete(draftKey(current));
           setDraftReset((value) => value + 1);
           action();
         },
@@ -197,7 +222,7 @@ export function AgentProjectsView({
       closeRef.current();
     };
     const unload = (event: BeforeUnloadEvent) => {
-      if (dirty.current) {
+      if (dirty.current || creatingDirty.current) {
         event.preventDefault();
         event.returnValue = "";
       }
@@ -283,6 +308,12 @@ export function AgentProjectsView({
               <button
                 className={`${button} p-1.5`}
                 aria-label="New project"
+                disabled={!hasRepository}
+                title={
+                  !hasRepository
+                    ? "Choose a repository folder first"
+                    : "New project"
+                }
                 onClick={() =>
                   guard(() => {
                     setName("");
@@ -447,15 +478,18 @@ export function AgentProjectsView({
                   <Bot className="size-7" />
                 </div>
                 <h2 className="text-2xl font-semibold tracking-tight">
-                  Give your work a home
+                  {hasRepository
+                    ? "Give your work a home"
+                    : "Choose a repository folder"}
                 </h2>
                 <p className="mt-3 text-sm leading-6 text-content/50">
-                  Move an initiative forward across conversations. Keep the
-                  plan, delegate focused tasks, and share the context every
-                  agent needs.
+                  {hasRepository
+                    ? "Move an initiative forward across conversations. Keep the plan, delegate focused tasks, and share the context every agent needs."
+                    : "Open a repository from the sidebar before creating a local project. Projects and their agents need a working folder."}
                 </p>
                 <button
                   className={`${primary} mt-6`}
+                  disabled={!hasRepository}
                   onClick={() => {
                     setName("");
                     setGoal("");
@@ -482,7 +516,8 @@ export function AgentProjectsView({
             className="space-y-4 p-5"
             onSubmit={(event) => {
               event.preventDefault();
-              if (pending || !name.trim() || !goal.trim()) return;
+              if (pending || !hasRepository || !name.trim() || !goal.trim())
+                return;
               setPending(true);
               setError("");
               void Promise.resolve()
@@ -614,18 +649,25 @@ function ProjectDetail({
   pending,
 }: DetailProps) {
   const [tab, setTab] = useState("Overview");
-  const [draft, setDraft] = useState(project);
-  const [baseline, setBaseline] = useState(project);
+  const recovery = useRef(projectDrafts.get(draftKey(project))).current;
+  const [draft, setDraft] = useState(recovery?.draft ?? project);
+  const [baseline, setBaseline] = useState(recovery?.baseline ?? project);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
-  const [savedNotice, setSavedNotice] = useState("");
-  const [task, setTask] = useState("");
-  const [taskTitle, setTaskTitle] = useState("");
+  const [savedNotice, setSavedNotice] = useState(
+    recovery
+      ? "Recovered your unsaved draft from this app session. Review and save when ready."
+      : "",
+  );
+  const [task, setTask] = useState(recovery?.task ?? "");
+  const [taskTitle, setTaskTitle] = useState(recovery?.taskTitle ?? "");
   const [schedule, setSchedule] = useState<AgentProjectSubscription | null>(
-    null,
+    recovery?.schedule ?? null,
   );
   const [consent, setConsent] = useState(false);
-  const [scheduleChanged, setScheduleChanged] = useState(false);
+  const [scheduleChanged, setScheduleChanged] = useState(
+    recovery?.scheduleChanged ?? false,
+  );
   const [discardSchedule, setDiscardSchedule] = useState(false);
   const [deleteSchedule, setDeleteSchedule] = useState<string | null>(null);
   const [discardContext, setDiscardContext] = useState(false);
@@ -635,6 +677,16 @@ function ProjectDetail({
     changed || !!task.trim() || !!taskTitle.trim() || scheduleChanged;
   useEffect(() => {
     onDirty(dirty);
+    if (dirty)
+      projectDrafts.set(draftKey(project), {
+        draft,
+        baseline,
+        task,
+        taskTitle,
+        schedule,
+        scheduleChanged,
+      });
+    else projectDrafts.delete(draftKey(project));
   });
   useEffect(() => {
     onBusy(working);
@@ -706,6 +758,7 @@ function ProjectDetail({
         throw new Error(
           "This project is unavailable or archived. Restore it before starting an agent.",
         );
+      projectDrafts.delete(draftKey(project));
       await onStartSession(
         fresh,
         role,
@@ -1050,6 +1103,11 @@ function ProjectDetail({
                     </button>
                   </div>
                   {memberList}
+                  <p className="mt-3 text-xs leading-5 text-content/45">
+                    {project.members.length}/64 team members. Unlink finished
+                    workers to make room for new tasks and scheduled runs.
+                    Unlinking preserves their chats and repository files.
+                  </p>
                 </section>
                 <form
                   className={`${panel} space-y-4`}
@@ -1234,12 +1292,15 @@ function ProjectDetail({
                     Opt in to recurring prompts in fresh worker chats, without
                     switching your active conversation. Schedules run only while
                     MonoCode is open, use your provider account, and retain
-                    supervised permissions. Busy projects and archived
-                    repositories are skipped; missed intervals are not replayed.
+                    supervised permissions. Archived repositories are skipped;
+                    missed intervals are not replayed. Workers can run
+                    concurrently in the same checkout; review parallel edits.
                   </p>
                   <p className="mt-3 text-xs text-content/40">
                     No cloud execution, Slack subscriptions, or GitHub event
-                    subscriptions.
+                    subscriptions. Projects support up to 64 team members;
+                    unlink finished workers in Agents to make room for scheduled
+                    runs. Chats and repository files are preserved.
                   </p>
                 </div>
                 <div className="flex items-center justify-between">

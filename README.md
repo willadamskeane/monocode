@@ -40,18 +40,20 @@ Windows (x86_64): download the NSIS installer from [GitHub Releases](https://git
 
 This is very early and you should expect bugs.
 
+Small, focused pull requests are welcome. Anything large is worth an issue first - see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Agent projects
 
 Open **Projects** in the sidebar to organize a long-running initiative within the current repository. This is inspired by [Cursor Projects](https://cursor.com/blog/projects), not an integration with Cursor's hosted Projects service.
 
 - Give the project a goal, then start or resume its coordinator. Delegate focused tasks to separate worker sessions; review the prepared message and choose a provider in the normal composer before sending.
-- Save shared instructions and context documents. Project members receive the latest saved context on each turn, including when switching providers. The coordinator can delegate through the selected provider's native subagent tools where supported.
-- Add opt-in, recurring **local subscriptions**. Each occurrence starts a fresh supervised worker using your default provider while MonoCode is open. Missed intervals are coalesced, not replayed; runs are skipped while another project agent is busy. Errors appear in the workspace.
+- Save shared instructions and context documents. Project members receive the latest saved context and bounded excerpts from other members' completed replies on each turn, including when switching providers. The coordinator can delegate through the selected provider's native subagent tools where supported.
+- Add opt-in, recurring **local subscriptions**. Each occurrence starts a fresh supervised worker using your default provider while MonoCode is open. Missed intervals are coalesced, not replayed. Workers may run in parallel in the same checkout, so review concurrent edits carefully. Errors appear in the workspace.
 - Archive a project to pause its subscriptions. Deleting an agent project removes its context and schedules, but keeps its conversations and repository files.
 
 Project metadata and context stay in MonoCode's local database; context is sent to your selected provider when a member runs. This does **not** provide cloud computers, cross-machine file synchronization, Slack/GitHub event subscriptions, or execution while MonoCode is closed. Context documents are saved reference text, not automatically synchronized repository files. Unsent drafts follow the normal session lifecycle.
 
-Small, focused pull requests are welcome. Anything large is worth an issue first - see [CONTRIBUTING.md](CONTRIBUTING.md).
+Each project supports 20 context documents, 20 subscriptions, and 64 linked agents. Remove finished workers from **Agents** to make room for new or scheduled runs; their saved chats are retained.
 
 ## Build from source
 

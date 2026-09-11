@@ -117,19 +117,20 @@ fn normalize_cwd(value: &str) -> Result<String, String> {
         value.as_bytes().get(1) == Some(&b':') && value.as_bytes()[0].is_ascii_alphabetic();
     let unc = value.starts_with("//") || value.starts_with("\\\\");
     let path = if windows || unc {
-        value.replace('\\', "/").to_ascii_lowercase()
+        value.replace('\\', "/").to_lowercase()
     } else {
         value.to_string()
     };
-    let (prefix, rest, floor) = if windows && path.as_bytes().get(2) == Some(&b'/') {
-        (format!("{}/", &path[..2]), &path[3..], 0)
-    } else if unc {
-        ("//".into(), path.trim_start_matches('/'), 2)
-    } else if path.starts_with('/') {
-        ("/".into(), path.trim_start_matches('/'), 0)
-    } else {
-        return Err("Repository path must be absolute".into());
-    };
+    let (prefix, rest, floor) =
+        if windows && (path.len() == 2 || path.as_bytes().get(2) == Some(&b'/')) {
+            (format!("{}/", &path[..2]), path.get(3..).unwrap_or(""), 0)
+        } else if unc {
+            ("//".into(), path.trim_start_matches('/'), 2)
+        } else if path.starts_with('/') {
+            ("/".into(), path.trim_start_matches('/'), 0)
+        } else {
+            return Err("Repository path must be absolute".into());
+        };
     let mut parts = Vec::new();
     for part in rest.split('/') {
         match part {
@@ -146,7 +147,9 @@ fn normalize_cwd(value: &str) -> Result<String, String> {
     if unc && parts.len() < 2 {
         return Err("UNC repository path requires a server and share".into());
     }
-    Ok(format!("{prefix}{}", parts.join("/")))
+    let normalized = format!("{prefix}{}", parts.join("/"));
+    bounded(&normalized, "repository path", 4096, true)?;
+    Ok(normalized)
 }
 
 fn timestamp(value: i64) -> Result<(), String> {
@@ -157,6 +160,7 @@ fn timestamp(value: i64) -> Result<(), String> {
 }
 
 fn validate(project: &mut AgentProject) -> Result<(), String> {
+    project.cwd = normalize_cwd(&project.cwd)?;
     // Reserve timestamp growth so later native revisions/claims always fit.
     let mut budget = project.clone();
     budget.created_at = MAX_SAFE_INTEGER;
@@ -169,7 +173,6 @@ fn validate(project: &mut AgentProject) -> Result<(), String> {
         return Err("Project exceeds 256000 UTF-8 bytes".into());
     }
     id(&project.id)?;
-    project.cwd = normalize_cwd(&project.cwd)?;
     bounded(&project.name, "project name", 200, true)?;
     bounded(&project.goal, "project goal", 16_000, false)?;
     bounded(&project.instructions, "project instructions", 16_000, false)?;
@@ -532,6 +535,9 @@ mod tests {
             assert!(normalize_cwd(path).is_err(), "{path}");
         }
         assert_eq!(normalize_cwd("C:\\Repo\\Folder\\..\\").unwrap(), "c:/repo");
+        assert_eq!(normalize_cwd("C:").unwrap(), "c:/");
+        assert_eq!(normalize_cwd("C:/").unwrap(), "c:/");
+        assert_eq!(normalize_cwd("C:\\RÉPO").unwrap(), "c:/répo");
         assert_eq!(
             normalize_cwd("\\\\Server\\Share\\Repo\\").unwrap(),
             "//server/share/repo"
@@ -562,6 +568,12 @@ mod tests {
         invalid.subscriptions[0].next_run_at = 0;
         invalid.subscriptions.push(invalid.subscriptions[0].clone());
         assert!(validate(&mut invalid).is_err());
+        let mut crowded = project("crowded", "/repo");
+        crowded.members = (0..65)
+            .map(|index| member(&format!("worker-{index}"), AgentProjectRole::Worker))
+            .collect();
+        assert!(validate(&mut crowded).unwrap_err().contains("64 members"));
+        assert_eq!(crowded.members.len(), 65);
         let mut value = serde_json::to_value(project("valid", "/repo")).unwrap();
         value["members"] = serde_json::json!([{"sessionId":"s", "role":"system", "title":"Task"}]);
         assert!(serde_json::from_value::<AgentProject>(value).is_err());

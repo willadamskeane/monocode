@@ -4292,17 +4292,6 @@ export default function App({
             )
           )
             return;
-          if (
-            latest.members.some((member) =>
-              sessionsRef.current.some(
-                (session) => session.id === member.sessionId && session.busy,
-              ),
-            )
-          ) {
-            throw new Error(
-              "Scheduled run skipped: a project agent is still running. The next interval will try again.",
-            );
-          }
         }
         const coordinator = latest.members.find(
           (member) => member.role === "coordinator",
@@ -4315,6 +4304,11 @@ export default function App({
           }
         }
         const session = newAgentProjectSession(latest, prompt, title);
+        if (latest.members.length >= 64 && role === "worker") {
+          throw new Error(
+            "This project has 64 linked agents. Remove finished workers from Projects → Agents before starting another run; their chats will be kept.",
+          );
+        }
         if (subscription) {
           session.composerSeed = undefined;
           await probeHarnessAvailability();

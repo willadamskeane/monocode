@@ -141,13 +141,68 @@ beforeEach(() => {
   document.body.append(container);
   root = createRoot(container);
 });
-afterEach(() => {
+afterEach(async () => {
+  if (container.querySelector('button[aria-label="Close Projects"]')) {
+    await click("Close Projects");
+    const confirm = [
+      ...document.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((item) => item.textContent?.trim() === "Confirm");
+    if (confirm) await act(async () => confirm.click());
+  }
   act(() => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
 });
 
 describe("Projects workspace", () => {
+  it("requires a repository instead of trying to create projects in the global home view", async () => {
+    props.cwd = "~";
+    await render();
+    expect(container.textContent).toContain("Choose a repository folder");
+    expect(findButton("New project").disabled).toBe(true);
+    expect(findButton("Create project").disabled).toBe(true);
+    expect(api.load).not.toHaveBeenCalled();
+  });
+
+  it("accepts the bare Windows drive-root form used by repository recents", async () => {
+    props.cwd = "C:";
+    await render();
+    expect(findButton("New project").disabled).toBe(false);
+    expect(api.load).toHaveBeenCalledWith("C:");
+  });
+
+  it("explains concurrent schedules and the explicit team capacity cleanup", async () => {
+    await render();
+    await selectProject();
+    await click("Subscriptions");
+    expect(container.textContent).toContain(
+      "concurrently in the same checkout",
+    );
+    expect(container.textContent).toContain("64 team members");
+    expect(container.textContent).not.toContain("Busy projects");
+    await click("Agents");
+    expect(container.textContent).toContain("0/64 team members");
+    expect(container.textContent).toContain("Unlink finished");
+  });
+
+  it("recovers unsaved context after external app navigation unmounts the workspace", async () => {
+    await render();
+    await selectProject();
+    await click("Context");
+    await type("Shared instructions", "Recover these instructions");
+    await act(async () => root.render(null));
+    await render();
+    await selectProject();
+    expect(container.textContent).toContain("Recovered your unsaved draft");
+    await click("Context");
+    expect(
+      document.querySelector<HTMLTextAreaElement>(
+        '[aria-label="Shared instructions"]',
+      )?.value,
+    ).toBe("Recover these instructions");
+    await click("Save changes");
+    expect(records[0].instructions).toBe("Recover these instructions");
+  });
   it.each([true, false])(
     "exposes Projects with the repository rail open=%s and hides absent callbacks",
     async (projectRailOpen) => {
