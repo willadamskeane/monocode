@@ -304,6 +304,11 @@ import {
   type AgentProjectSubscription,
 } from "./lib/agentProjects";
 import {
+  isCoordinatorLeaf,
+  orderTabsWithCoordinatorFirst,
+  sessionBelongsToProject,
+} from "./lib/projectTabs";
+import {
   legacyProjectInputs,
   migrateLegacyProjectAppearance,
 } from "./lib/projectIdentity";
@@ -2490,8 +2495,12 @@ export default function App({
     // rather than trailing the last project's tabs.
     const active = tabs.find((tab) => tab.id === activeTabId);
     if (active && !workspaceTabCwd(active, sessions)) return [active];
-    return filterTabsForProject(tabs, sessions, projectCwd, activeProjectId);
-  }, [activeTabId, tabs, sessions, projectCwd, activeProjectId]);
+    const project = agentProjects.find((entry) => entry.id === activeProjectId);
+    return orderTabsWithCoordinatorFirst(
+      filterTabsForProject(tabs, sessions, projectCwd, activeProjectId),
+      project,
+    );
+  }, [activeTabId, agentProjects, tabs, sessions, projectCwd, activeProjectId]);
 
   const onNext = useCallback(() => {
     const index = deckProjectTabs.findIndex((t) => t.id === activeTabId);
@@ -2742,6 +2751,10 @@ export default function App({
           isBlankSession(sessionsRef.current.find((entry) => entry.id === id)),
         );
     if (!paneId || paneId === session.id) return false;
+    const activeProject = agentProjectsRef.current.find(
+      (entry) => entry.id === activeProjectIdRef.current,
+    );
+    if (isCoordinatorLeaf(paneId, activeProject)) return false;
 
     lastPersisted.current.delete(paneId);
     {
@@ -2912,7 +2925,20 @@ export default function App({
 
   const onSelectHistorySession = useCallback(
     async (sessionId: string) => {
-      setAgentProjectsViewOpen(false);
+      const known =
+        sessionsRef.current.find((session) => session.id === sessionId) ??
+        null;
+      const activeProject = agentProjectsRef.current.find(
+        (entry) => entry.id === activeProjectIdRef.current,
+      );
+      const keepPane =
+        !!activeProject &&
+        (known
+          ? sessionBelongsToProject(known, activeProject)
+          : activeProject.members.some(
+              (member) => member.sessionId === sessionId,
+            ));
+      if (!keepPane) setAgentProjectsViewOpen(false);
       if (focusOpenSession(sessionId)) return;
       const session = await ensureOpenSession(sessionId);
       if (!session || session.inboxAsk) return;
@@ -5374,8 +5400,24 @@ export default function App({
     [onOpenApprovalSession],
   );
 
+  const activeAgentProject = agentProjects.find(
+    (entry) => entry.id === activeProjectId,
+  );
+  const coordinatorHome = activeAgentProject
+    ? coordinatorMember(activeAgentProject)
+    : undefined;
   const nextTitleTabs: TitleTab[] = deckProjectTabs.map((tab) =>
-    toTitleTab(tab, sessions, dirtyFiles),
+    toTitleTab(
+      tab,
+      sessions,
+      dirtyFiles,
+      coordinatorHome && activeAgentProject
+        ? {
+            sessionId: coordinatorHome.sessionId,
+            name: activeAgentProject.name,
+          }
+        : undefined,
+    ),
   );
   tabProjectsRef.current = new Map(
     nextTitleTabs.map((tab) => [tab.id, tab.project]),
@@ -6712,6 +6754,7 @@ function toTitleTab(
   tab: WorkspaceTab,
   sessions: Session[],
   dirtyFiles: Set<string>,
+  home?: { sessionId: string; name: string },
 ): TitleTab {
   const paneIds = leafIds(tab.layout);
   const multiPane = paneIds.length > 1;
@@ -6795,15 +6838,23 @@ function toTitleTab(
     pane.files.some(isTerminalTab),
   );
   const focusedFile = focusedFileTab(tab);
+  const isHome = !!home && paneIds.includes(home.sessionId);
+  const homeFocused = isHome && tab.focusedId === home.sessionId;
 
   return {
     id: tab.id,
-    project: focused
-      ? projectName(focused.cwd)
-      : focusedFile
-        ? projectName(focusedFile.cwd)
-        : "~",
-    title: focused ? conversationTitle(focused) : "",
+    project: isHome
+      ? home.name
+      : focused
+        ? projectName(focused.cwd)
+        : focusedFile
+          ? projectName(focusedFile.cwd)
+          : "~",
+    title: homeFocused
+      ? home.name
+      : focused
+        ? conversationTitle(focused)
+        : "",
     more,
     sessionCount: tabSessions.length,
     harnesses,
