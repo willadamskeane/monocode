@@ -1,9 +1,13 @@
 import { leafIds, type WorkspaceTab } from "./layout";
 import type { Session } from "./session";
 import { pathKey } from "./paths";
-import { sameProjectPath } from "./recents";
+import { workspaceTabProjectId } from "./workspaceTabGroups";
 
 export type ProjectReturnMemory = ReadonlyMap<string, string>;
+
+export function projectReturnKey(projectPath: string, projectId?: string): string {
+  return projectId ? `project:${projectId}` : pathKey(projectPath);
+}
 
 type ProjectReturnContext = {
   memory: ProjectReturnMemory;
@@ -22,37 +26,40 @@ export type ProjectReturnDecision =
 
 export function isBlankSession(session: Session | undefined): boolean {
   if (!session || session.busy) return false;
+  if (session.composerSeed) return false;
   return !session.blocks.some((block) => block.role === "user");
 }
 
 function paneProjects(
   tabs: readonly WorkspaceTab[],
-  sessions: readonly Pick<Session, "id" | "cwd">[],
+  sessions: readonly Pick<Session, "id" | "cwd" | "projectId">[],
 ): PaneProject {
-  const cwdBySession = new Map(
-    sessions.map((session) => [session.id, session.cwd]),
+  const sessionById = new Map(
+    sessions.map((session) => [session.id, session]),
   );
   const result = new Map<string, string>();
 
   for (const tab of tabs) {
+    const tabProjectId = workspaceTabProjectId(tab, sessions);
     for (const paneId of leafIds(tab.layout)) {
-      const cwd = cwdBySession.get(paneId);
-      if (cwd && cwd !== "~") {
-        result.set(paneId, pathKey(cwd));
+      const session = sessionById.get(paneId);
+      const projectId = session?.projectId ?? tabProjectId;
+      if (projectId || (session?.cwd && session.cwd !== "~")) {
+        result.set(paneId, projectReturnKey(session?.cwd ?? "~", projectId));
       }
     }
 
     for (const pane of tab.editorPanes) {
       const active = pane.files.find((file) => file.id === pane.activeFileId);
-      if (active && active.cwd !== "~") {
-        result.set(pane.id, pathKey(active.cwd));
+      if (tabProjectId || (active && active.cwd !== "~")) {
+        result.set(pane.id, projectReturnKey(active?.cwd ?? "~", tabProjectId));
       }
     }
 
     for (const pane of tab.terminalPanes ?? []) {
       const active = pane.files.find((file) => file.id === pane.activeFileId);
-      if (active && active.cwd !== "~") {
-        result.set(pane.id, pathKey(active.cwd));
+      if (tabProjectId || (active && active.cwd !== "~")) {
+        result.set(pane.id, projectReturnKey(active?.cwd ?? "~", tabProjectId));
       }
     }
   }
@@ -70,7 +77,7 @@ function paneBelongsToProject(
   paneById: PaneProject,
 ): boolean {
   const project = paneById.get(paneId);
-  return !!project && sameProjectPath(project, target);
+  return !!project && project === target;
 }
 
 function paneForProjectInTab(
@@ -104,7 +111,7 @@ export function reconcileProjectReturn({
   sessions,
   activeTabId,
 }: Omit<ProjectReturnContext, "sessions"> & {
-  sessions: readonly Pick<Session, "id" | "cwd">[];
+  sessions: readonly Pick<Session, "id" | "cwd" | "projectId">[];
 }): ProjectReturnMemory {
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const byPane = paneProjects(tabs, sessions);
@@ -143,8 +150,9 @@ export function planProjectReturn({
   sessions,
   activeTabId,
   projectPath,
-}: ProjectReturnContext & { projectPath: string }): ProjectReturnDecision {
-  const target = pathKey(projectPath);
+  projectId,
+}: ProjectReturnContext & { projectPath: string; projectId?: string }): ProjectReturnDecision {
+  const target = projectReturnKey(projectPath, projectId);
   const byPane = paneProjects(tabs, sessions);
   const active = tabs.find((tab) => tab.id === activeTabId);
 
@@ -176,7 +184,7 @@ export function planProjectReturn({
   const current =
     active?.focusedId &&
     sessions.find((session) => session.id === active.focusedId);
-  return current && isBlankSession(current)
+  return current && !current.projectId && !active?.projectId && !projectId && isBlankSession(current)
     ? { action: "reuse-blank", sessionId: current.id }
     : { action: "create" };
 }

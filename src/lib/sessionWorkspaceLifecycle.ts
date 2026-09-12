@@ -10,6 +10,7 @@ import {
 import type { Session } from "./session";
 import {
   planWorkspaceTabClose,
+  workspaceTabProjectId,
   type WorkspaceTabCloseScope,
 } from "./workspaceTabGroups";
 
@@ -83,7 +84,9 @@ export function removeSessionFromWorkspace({
       continue;
     }
 
-    const replacement = createReplacement(seed);
+    const created = createReplacement(seed);
+    const projectId = workspaceTabProjectId(tab, sessions);
+    const replacement = projectId ? { ...created, projectId } : created;
     remainingSessionIds.add(replacement.id);
     nextSessions = [...nextSessions, replacement];
     nextTabs[index] = {

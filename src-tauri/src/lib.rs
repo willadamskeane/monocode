@@ -1,5 +1,6 @@
 use tauri::Manager;
 
+mod agent_projects;
 mod chat_background;
 mod checkpoint;
 mod cursor_store;
@@ -307,6 +308,8 @@ pub fn run() {
             pty::pty_kill_all,
             session_store::session_upsert,
             session_store::session_list_by_project,
+            session_store::session_list_by_agent_project,
+            session_store::session_assign_project,
             session_store::session_list_linked,
             session_store::session_search,
             session_store::session_get,
@@ -319,6 +322,13 @@ pub fn run() {
             session_store::workspace_set_snapshot,
             session_store::workspace_get_snapshot,
             notes::notes_list,
+            agent_projects::agent_projects_list,
+            agent_projects::agent_projects_migrate_legacy,
+            agent_projects::agent_projects_ensure_default,
+            agent_projects::agent_projects_save,
+            agent_projects::agent_projects_delete,
+            agent_projects::agent_projects_delete_for_cwd,
+            agent_projects::agent_projects_claim_due,
             notes::notes_get,
             notes::notes_upsert,
             notes::notes_delete,

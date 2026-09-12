@@ -19,9 +19,15 @@ import { MenuBar } from "./chrome/MenuBar";
 import { FilePicker } from "./chrome/FilePicker";
 import { UsageFooter } from "./chrome/UsageFooter";
 import { useProjectBranches } from "./hooks/useProjectBranches";
+import { useDragResize } from "./hooks/useDragResize";
 import {
+  loadProjectPaneWidth,
   loadProjectRailOpen,
   loadSidebarTabOrder,
+  PROJECT_PANE_WIDTH_DEFAULT,
+  PROJECT_PANE_WIDTH_MAX,
+  PROJECT_PANE_WIDTH_MIN,
+  saveProjectPaneWidth,
   saveProjectRailOpen,
   type SidebarTabId,
 } from "./lib/appearance";
@@ -66,7 +72,8 @@ import {
   neighborLeafId,
   newFileTab,
   newPlanTab,
-  newTab,
+  newProjectDocumentTab,
+  newTab as createWorkspaceTab,
   newTerminalFile,
   newTerminalWorkspaceTab,
   nextTerminalTitle,
@@ -97,8 +104,8 @@ import {
   applyDockGridStyle,
   closeTerminalInDock,
   createProjectTerminal,
-  findProjectTerminal,
-  mapProjectTerminal,
+  findProjectTerminal as findOwnedProjectTerminal,
+  mapProjectTerminal as mapOwnedProjectTerminal,
   nextDockTerminalTitle,
   patchProjectTerminals,
   reorderDockTerminals,
@@ -206,15 +213,14 @@ import {
   rebasePath,
   resolveWorkspacePath,
 } from "./lib/paths";
-import { removeProjectData } from "./lib/projectData";
 import {
   archiveProject,
   forgetProject,
   lastProjectPath,
+  loadArchivedProjects,
   loadRecents,
   looksLikeProject,
   normalizeProjectPath,
-  projectRailItems,
   rememberProject,
   sameProjectPath,
 } from "./lib/recents";
@@ -232,8 +238,8 @@ import {
   canReplaceSessionTitle,
   formatSessionTitle,
   sessionNeedsInput,
-  newDefaultSession,
-  newSession,
+  newDefaultSession as createDefaultSession,
+  newSession as createSession,
   sessionDisplayTitle,
   sessionWorkCwd,
   titleFromPrompt,
@@ -256,9 +262,11 @@ import {
 } from "./lib/messageQueue";
 import { dropContextWindow } from "./lib/contextUsage";
 import {
+  assignSessionProject,
   deleteSession,
   getSession,
   listLinkedSessions,
+  listSessionsByAgentProject,
   listSessionsByProject,
   persistFingerprint,
   replaceInFlightSessions,
@@ -273,6 +281,43 @@ import { syncDockBadge } from "./lib/dockBadge";
 import { liveAgentsFromSessions } from "./lib/liveAgents";
 import { hiddenApprovalNotices } from "./lib/approvalToast";
 import { useSessionReminders } from "./hooks/useSessionReminders";
+import { useAgentProjectSubscriptions } from "./hooks/useAgentProjectSubscriptions";
+import { newAgentProjectSession } from "./lib/agentProjectSession";
+import {
+  harnessUnavailableHint,
+  isHarnessAvailable,
+} from "./lib/harness/availability";
+import {
+  applyAgentProjectContext,
+  createAgentProject,
+  loadAgentProjects,
+  saveAgentProject,
+  migrateLegacyProjects,
+  ensureDefaultAgentProject,
+  deleteAgentProject,
+  subscribeAgentProjects,
+  isWorkspaceProject,
+  coordinatorMember,
+  coordinatorPrompt,
+  type AgentProject,
+  type AgentProjectDocument,
+  type AgentProjectSubscription,
+} from "./lib/agentProjects";
+import {
+  isCoordinatorLeaf,
+  orderTabsWithCoordinatorFirst,
+  sessionBelongsToProject,
+} from "./lib/projectTabs";
+import {
+  legacyProjectInputs,
+  migrateLegacyProjectAppearance,
+} from "./lib/projectIdentity";
+import {
+  resolveActiveAgentProject,
+  restoreProjectOwnership,
+} from "./lib/appProjectState";
+import { removeProjectData } from "./lib/projectData";
+import { Modal } from "./chrome/Modal";
 import { ReminderNotices } from "./chrome/ReminderNotices";
 import { nextUnseenFinishedSessions } from "./lib/sessionDone";
 import {
@@ -338,6 +383,7 @@ import { InboxView } from "./surfaces/InboxView";
 import type { InboxSessionPortal } from "./surfaces/InboxDiscussionPanel";
 import { inboxAskKey, inboxAskPrompt } from "./lib/inboxAsk";
 import { NotesView } from "./surfaces/NotesView";
+import { AgentProjectsView } from "./surfaces/AgentProjectsView";
 import { inboxComposerCard, type InboxItem } from "./lib/githubTasks";
 import {
   linkedWorkItemFromInboxItem,
@@ -571,7 +617,6 @@ export default function App({
   resumed = null,
   installedUpdate = null,
   history: bootHistory = [],
-  historyCwd: bootHistoryCwd = null,
 }: {
   windowTransfer?: WindowTransferPayload | null;
   resumed?: ResumedWorkspace | null;
@@ -586,6 +631,48 @@ export default function App({
       lastProjectPath() ??
       "~",
   );
+  const [activeProjectId, setActiveProjectId] = useState<string | undefined>(
+    () => windowTransfer?.activeProjectId ?? resumed?.activeProjectId,
+  );
+  const activeProjectIdRef = useRef(activeProjectId);
+  activeProjectIdRef.current = activeProjectId;
+  const [agentProjects, setAgentProjects] = useState<AgentProject[]>([]);
+  const agentProjectsRef = useRef(agentProjects);
+  agentProjectsRef.current = agentProjects;
+  const [projectsReady, setProjectsReady] = useState(false);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
+  const [createProjectName, setCreateProjectName] = useState("");
+  const [createProjectGoal, setCreateProjectGoal] = useState("");
+  const [createProjectBusy, setCreateProjectBusy] = useState(false);
+  const projectPaneResize = useDragResize({
+    direction: "left",
+    min: PROJECT_PANE_WIDTH_MIN,
+    max: () =>
+      Math.min(PROJECT_PANE_WIDTH_MAX, Math.floor(window.innerWidth * 0.45)),
+    defaultWidth: PROJECT_PANE_WIDTH_DEFAULT,
+    initial: loadProjectPaneWidth(),
+    onCommit: saveProjectPaneWidth,
+  });
+  const newSession = useCallback((...args: Parameters<typeof createSession>): Session => ({
+    ...createSession(...args),
+    projectId: activeProjectIdRef.current,
+  }), []);
+  const newDefaultSession = useCallback((...args: Parameters<typeof createDefaultSession>): Session => ({
+    ...createDefaultSession(...args),
+    projectId: activeProjectIdRef.current,
+  }), []);
+  const newTab = useCallback((...args: Parameters<typeof createWorkspaceTab>): WorkspaceTab => ({
+    ...createWorkspaceTab(...args),
+    projectId: activeProjectIdRef.current,
+  }), []);
+  const findProjectTerminal = useCallback((
+    docks: ProjectTerminal[], cwd: string, projectId = activeProjectIdRef.current,
+  ) => findOwnedProjectTerminal(docks, cwd, projectId), []);
+  const mapProjectTerminal = useCallback((
+    docks: ProjectTerminal[], cwd: string, update: (dock: ProjectTerminal) => ProjectTerminal | null,
+    projectId = activeProjectIdRef.current,
+  ) => mapOwnedProjectTerminal(docks, cwd, update, projectId), []);
   const [recents, setRecents] = useState(() =>
     resumed?.projectCwd && looksLikeProject(resumed.projectCwd)
       ? rememberProject(resumed.projectCwd)
@@ -593,8 +680,8 @@ export default function App({
   );
   const [seed] = useState(() => {
     const cwd = lastProjectPath() ?? "~";
-    const session = newDefaultSession(cwd);
-    const tab = newTab(session.id);
+    const session = createDefaultSession(cwd);
+    const tab = createWorkspaceTab(session.id);
     return { session, tab };
   });
   const [sessions, setSessions] = useState<Session[]>(
@@ -643,6 +730,7 @@ export default function App({
     useState<InboxSessionPortal | null>(null);
   const openingInboxSessions = useRef(new Map<string, Promise<string>>());
   const [notesViewOpen, setNotesViewOpen] = useState(false);
+  const [agentProjectsViewOpen, setAgentProjectsViewOpen] = useState(false);
   const notesEnabled = useSyncExternalStore(
     subscribeNotesEnabled,
     loadNotesEnabled,
@@ -683,10 +771,7 @@ export default function App({
    * a new project must already know the listing has not arrived yet.
    */
   const [loadedProjects, setLoadedProjects] = useState<ReadonlySet<string>>(
-    () =>
-      bootHistoryCwd
-        ? new Set([normalizeProjectPath(bootHistoryCwd)])
-        : new Set(),
+    () => new Set(),
   );
   const loadedProjectsRef = useRef(loadedProjects);
   loadedProjectsRef.current = loadedProjects;
@@ -714,6 +799,8 @@ export default function App({
   inboxViewOpenRef.current = inboxViewOpen;
   const notesViewOpenRef = useRef(notesViewOpen);
   notesViewOpenRef.current = notesViewOpen;
+  const agentProjectsViewOpenRef = useRef(agentProjectsViewOpen);
+  agentProjectsViewOpenRef.current = agentProjectsViewOpen;
   const settingsOpenRef = useRef(settingsOpen);
   settingsOpenRef.current = settingsOpen;
   const sessionNavigationIdsRef = useRef<readonly string[]>([]);
@@ -721,6 +808,58 @@ export default function App({
   filePickerOpenRef.current = filePickerOpen;
   const whatsNewVersionRef = useRef(whatsNewVersion);
   whatsNewVersionRef.current = whatsNewVersion;
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const migrated = await migrateLegacyProjects(legacyProjectInputs());
+        migrateLegacyProjectAppearance(migrated);
+        const projects = await loadAgentProjects();
+        if (cancelled) return;
+        setAgentProjects(projects);
+        const cwd = projectCwdRef.current;
+        let active = resolveActiveAgentProject(
+          projects,
+          activeProjectIdRef.current,
+          cwd,
+        );
+        if (!active && looksLikeProject(cwd)) {
+          active = await ensureDefaultAgentProject(cwd, projectName(cwd));
+        }
+        if (cancelled) return;
+        if (active) {
+          activeProjectIdRef.current = active.id;
+          setActiveProjectId(active.id);
+          if (!sameProjectPath(projectCwdRef.current, active.cwd)) {
+            setProjectCwd(active.cwd);
+          }
+          setRecents(rememberProject(active.cwd));
+        }
+        setSessions((current) => restoreProjectOwnership(current, projects));
+        setProjectsError(null);
+      } catch (error: unknown) {
+        if (!cancelled) setProjectsError(String(error));
+      } finally {
+        if (!cancelled) setProjectsReady(true);
+      }
+    })();
+    const unsubscribe = subscribeAgentProjects(() => {
+      void loadAgentProjects()
+        .then((projects) => {
+          if (cancelled) return;
+          setAgentProjects(projects);
+          setSessions((current) => restoreProjectOwnership(current, projects));
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) setProjectsError(String(error));
+        });
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     if (!notesEnabled) setNotesViewOpen(false);
@@ -944,13 +1083,14 @@ export default function App({
   sidebarCwdRef.current = sidebarCwd;
   const sidebarCwdKey =
     sidebarCwd && sidebarCwd !== "~" ? normalizeProjectPath(sidebarCwd) : null;
+  const historyKey = activeProjectId ?? sidebarCwdKey;
   const historyFailed =
-    sidebarCwdKey != null && historyErrorCwd === sidebarCwdKey;
+    historyKey != null && historyErrorCwd === historyKey;
   // True from the very first frame that shows a project we have never listed,
   // so the sidebar can stay blank instead of flashing "No sessions yet".
   const historyPending =
-    sidebarCwdKey != null &&
-    !loadedProjects.has(sidebarCwdKey) &&
+    historyKey != null &&
+    !loadedProjects.has(historyKey) &&
     !historyFailed;
   const gitCwd = active ? sessionWorkCwd(active) : sidebarCwd;
   const gitCwdRef = useRef(gitCwd);
@@ -1056,6 +1196,21 @@ export default function App({
         : [],
     [liveAgentsEnabled, sessions, unseenFinishedIds],
   );
+  const busyProjectIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const session of sessions) {
+      if (session.busy && session.projectId) ids.add(session.projectId);
+    }
+    return ids;
+  }, [sessions]);
+  const approvalProjectIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const session of sessions) {
+      if (approvalSessionIds.has(session.id) && session.projectId)
+        ids.add(session.projectId);
+    }
+    return ids;
+  }, [approvalSessionIds, sessions]);
 
   const hiddenApprovalToasts = useMemo(
     () => hiddenApprovalNotices(sessions, activeTabId, tabs, composerFocused),
@@ -1140,7 +1295,7 @@ export default function App({
     };
   }, [flushHarnessEvents, readProjectReturnMemory]);
 
-  const refreshHistory = useCallback(async (cwd: string) => {
+  const refreshHistory = useCallback(async (cwd: string, projectId?: string) => {
     if (!cwd || cwd === "~") return;
     // `history` holds every visited project's rows and the sidebar filters it
     // by cwd, so a project loaded once paints from cache on the way back and
@@ -1148,17 +1303,31 @@ export default function App({
     // first load is still pending is derived from `loadedProjects`, not
     // tracked here — a status set from this effect lands a render too late to
     // suppress the empty state.
-    const key = normalizeProjectPath(cwd);
+    const key = projectId ?? normalizeProjectPath(cwd);
     setHistoryErrorCwd((prev) => (prev === key ? null : prev));
     try {
-      const rows = await listSessionsByProject(cwd);
-      if (cwd !== sidebarCwdRef.current) return;
-      setHistory((current) => replaceProjectHistory(current, cwd, rows));
+      const rows = projectId
+        ? await listSessionsByAgentProject(projectId)
+        : await listSessionsByProject(cwd);
+      if (
+        projectId
+          ? projectId !== activeProjectIdRef.current
+          : cwd !== sidebarCwdRef.current
+      )
+        return;
+      setHistory((current) =>
+        replaceProjectHistory(current, cwd, rows, projectId),
+      );
       setLoadedProjects((prev) =>
         prev.has(key) ? prev : new Set(prev).add(key),
       );
     } catch {
-      if (cwd !== sidebarCwdRef.current) return;
+      if (
+        projectId
+          ? projectId !== activeProjectIdRef.current
+          : cwd !== sidebarCwdRef.current
+      )
+        return;
       // A failed revalidate keeps the cached cards rather than replacing a
       // good list with an error.
       if (!loadedProjectsRef.current.has(key)) setHistoryErrorCwd(key);
@@ -1166,8 +1335,8 @@ export default function App({
   }, []);
 
   useEffect(() => {
-    void refreshHistory(sidebarCwd);
-  }, [sidebarCwd, refreshHistory]);
+    void refreshHistory(sidebarCwd, activeProjectId);
+  }, [sidebarCwd, activeProjectId, refreshHistory]);
 
   useEffect(() => {
     if (!inboxViewOpen) return;
@@ -1383,9 +1552,11 @@ export default function App({
   }, [sessions, tabs, persistSession, liveAgentsEnabled]);
 
   const activateTab = useCallback((id: string, paneId?: string) => {
+    setAgentProjectsViewOpen(false);
     const tab = tabsRef.current.find((entry) => entry.id === id);
     const nextFocusedId =
-      tab && paneId &&
+      tab &&
+      paneId &&
       (leafIds(tab.layout).includes(paneId) ||
         tab.editorPanes.some((entry) => entry.id === paneId) ||
         (tab.terminalPanes ?? []).some((entry) => entry.id === paneId))
@@ -1473,6 +1644,7 @@ export default function App({
   }, []);
 
   const onNew = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
@@ -1495,6 +1667,7 @@ export default function App({
   const onStartInboxItem = useCallback(
     async (item: InboxItem, body?: string) => {
       const start = (description?: string) => {
+        setAgentProjectsViewOpen(false);
         setInboxViewOpen(false);
         setNotesViewOpen(false);
         setSidebarTab("sessions");
@@ -1549,6 +1722,7 @@ export default function App({
   const onAddNoteToChat = useCallback(
     (card: NoteComposerCard) => {
       if (!card.id) return;
+      setAgentProjectsViewOpen(false);
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
@@ -2321,8 +2495,12 @@ export default function App({
     // rather than trailing the last project's tabs.
     const active = tabs.find((tab) => tab.id === activeTabId);
     if (active && !workspaceTabCwd(active, sessions)) return [active];
-    return filterTabsForProject(tabs, sessions, projectCwd);
-  }, [activeTabId, tabs, sessions, projectCwd]);
+    const project = agentProjects.find((entry) => entry.id === activeProjectId);
+    return orderTabsWithCoordinatorFirst(
+      filterTabsForProject(tabs, sessions, projectCwd, activeProjectId),
+      project,
+    );
+  }, [activeTabId, agentProjects, tabs, sessions, projectCwd, activeProjectId]);
 
   const onNext = useCallback(() => {
     const index = deckProjectTabs.findIndex((t) => t.id === activeTabId);
@@ -2573,6 +2751,10 @@ export default function App({
           isBlankSession(sessionsRef.current.find((entry) => entry.id === id)),
         );
     if (!paneId || paneId === session.id) return false;
+    const activeProject = agentProjectsRef.current.find(
+      (entry) => entry.id === activeProjectIdRef.current,
+    );
+    if (isCoordinatorLeaf(paneId, activeProject)) return false;
 
     lastPersisted.current.delete(paneId);
     {
@@ -2743,6 +2925,20 @@ export default function App({
 
   const onSelectHistorySession = useCallback(
     async (sessionId: string) => {
+      const known =
+        sessionsRef.current.find((session) => session.id === sessionId) ??
+        null;
+      const activeProject = agentProjectsRef.current.find(
+        (entry) => entry.id === activeProjectIdRef.current,
+      );
+      const keepPane =
+        !!activeProject &&
+        (known
+          ? sessionBelongsToProject(known, activeProject)
+          : activeProject.members.some(
+              (member) => member.sessionId === sessionId,
+            ));
+      if (!keepPane) setAgentProjectsViewOpen(false);
       if (focusOpenSession(sessionId)) return;
       const session = await ensureOpenSession(sessionId);
       if (!session || session.inboxAsk) return;
@@ -2797,7 +2993,9 @@ export default function App({
   const sessionReminders = useSessionReminders(
     openReminderSession,
     ensureReminderSessionsSaved,
-    sessions.filter((session) => !session.inboxAsk).map((session) => session.id),
+    sessions
+      .filter((session) => !session.inboxAsk)
+      .map((session) => session.id),
   );
 
   const onPlaceSessionOnPane = useCallback(
@@ -3087,6 +3285,7 @@ export default function App({
             searchViewOpenRef.current ||
             inboxViewOpenRef.current ||
             notesViewOpenRef.current ||
+            agentProjectsViewOpenRef.current ||
             settingsOpenRef.current ||
             filePickerOpenRef.current ||
             whatsNewVersionRef.current,
@@ -3199,20 +3398,36 @@ export default function App({
         !sameProjectPath(previous, normalized) &&
         !isBlankSession(current)
       ) {
-        setProjectCwd(normalized);
-        setRecents(rememberProject(normalized));
-        const session = newSession(
-          current.harness,
-          normalized,
-          current.model,
-          current.runtimeMode,
-          current.modelSettings,
-        );
-        const tab = newTab(session.id);
-        setSessions((prev) => [...prev, session]);
-        appendTab(tab, normalized);
-        setActiveTabId(tab.id);
-        setComposerFocused(true);
+        void ensureDefaultAgentProject(normalized, projectName(normalized))
+          .then((project) => {
+            activeProjectIdRef.current = project.id;
+            setActiveProjectId(project.id);
+            setAgentProjects((entries) =>
+              entries.some((entry) => entry.id === project.id)
+                ? entries
+                : [...entries, project],
+            );
+            setProjectCwd(normalized);
+            setRecents(rememberProject(normalized));
+            const session = newSession(
+              current.harness,
+              normalized,
+              current.model,
+              current.runtimeMode,
+              current.modelSettings,
+            );
+            const tab = newTab(session.id);
+            setSessions((prev) => [...prev, session]);
+            appendTab(tab, normalized);
+            setActiveTabId(tab.id);
+            setComposerFocused(true);
+          })
+          .catch((error: unknown) => {
+            void message(String(error), {
+              title: "Open project",
+              kind: "error",
+            });
+          });
         return;
       }
       if (
@@ -3230,6 +3445,7 @@ export default function App({
             ? {
                 ...s,
                 cwd: normalized,
+                projectId: activeProjectIdRef.current ?? s.projectId,
                 branch: undefined,
                 worktreeCwd: undefined,
               }
@@ -3280,13 +3496,56 @@ export default function App({
     [persistSession],
   );
 
-  const onSelectProject = useCallback(
-    (path: string) => {
+  const switchAgentProject = useCallback(
+    (project: AgentProject) => {
+      setAgentProjectsViewOpen(false);
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
-      const normalized = normalizeProjectPath(path);
+      const normalized = normalizeProjectPath(project.cwd);
       if (!looksLikeProject(normalized)) return;
+      activeProjectIdRef.current = project.id;
+      setActiveProjectId(project.id);
+
+      const coordinator = coordinatorMember(project);
+      const initiative = !isWorkspaceProject(project);
+      if (coordinator) {
+        setProjectCwd(normalized);
+        setRecents(rememberProject(normalized));
+        setAgentProjectsViewOpen(initiative);
+        void onSelectHistorySession(coordinator.sessionId);
+        for (const member of project.members) {
+          if (member.sessionId === coordinator.sessionId) continue;
+          void ensureOpenSession(member.sessionId).then((session) => {
+            if (!session) return;
+            setSessions((prev) =>
+              prev.some((entry) => entry.id === session.id)
+                ? prev
+                : [...prev, session],
+            );
+            if (
+              !tabsRef.current.some((tab) =>
+                leafIds(tab.layout).includes(session.id),
+              )
+            ) {
+              appendTab(newTab(session.id), session.cwd);
+            }
+          });
+        }
+        return;
+      }
+      if (initiative) {
+        setProjectCwd(normalized);
+        setRecents(rememberProject(normalized));
+        setAgentProjectsViewOpen(true);
+        void startProjectAgentRef.current(
+          project,
+          "coordinator",
+          coordinatorPrompt(project),
+          project.name,
+        );
+        return;
+      }
 
       const activeWorkspace = tabsRef.current.find(
         (entry) => entry.id === activeTabIdRef.current,
@@ -3302,45 +3561,217 @@ export default function App({
         sessions: sessionsRef.current,
         activeTabId: activeTabIdRef.current,
         projectPath: normalized,
+        projectId: project.id,
       });
       switch (decision.action) {
         case "keep":
           setProjectCwd(normalized);
           setRecents(rememberProject(normalized));
-          return;
+          break;
         case "reuse-blank":
           onCwdChange(decision.sessionId, normalized);
-          return;
+          break;
         case "activate":
           setProjectCwd(normalized);
           setRecents(rememberProject(normalized));
           activateTab(decision.tabId, decision.paneId);
-          return;
-        case "create":
           break;
+        case "create": {
+          const seed = current ?? sessionsRef.current[0];
+          const session = newSession(
+            seed?.harness ?? "claude",
+            normalized,
+            seed?.model,
+            seed?.runtimeMode,
+            seed?.modelSettings,
+          );
+          const tab = newTab(session.id);
+          setProjectCwd(normalized);
+          setRecents(rememberProject(normalized));
+          setSessions((prev) => [...prev, session]);
+          appendTab(tab, normalized);
+          setActiveTabId(tab.id);
+          setComposerFocused(true);
+          break;
+        }
         default: {
           const exhaustive: never = decision;
           return exhaustive;
         }
       }
-
-      const seed = current ?? sessionsRef.current[0];
-      const session = newSession(
-        seed?.harness ?? "claude",
-        normalized,
-        seed?.model,
-        seed?.runtimeMode,
-        seed?.modelSettings,
-      );
-      const tab = newTab(session.id);
-      setProjectCwd(normalized);
-      setRecents(rememberProject(normalized));
-      setSessions((prev) => [...prev, session]);
-      appendTab(tab, normalized);
-      setActiveTabId(tab.id);
-      setComposerFocused(true);
+      setAgentProjectsViewOpen(false);
     },
-    [activateTab, appendTab, onCwdChange, readProjectReturnMemory],
+    [
+      activateTab,
+      appendTab,
+      ensureOpenSession,
+      newTab,
+      onCwdChange,
+      onSelectHistorySession,
+      readProjectReturnMemory,
+    ],
+  );
+
+  const onSelectAgentProject = useCallback(
+    (id: string) => {
+      const project = agentProjectsRef.current.find(
+        (entry) => entry.id === id && !entry.archived,
+      );
+      if (project) switchAgentProject(project);
+    },
+    [switchAgentProject],
+  );
+
+  const onCreateAgentProject = useCallback(() => {
+    const create = (cwd: string) => {
+      setCreateProjectName("");
+      setCreateProjectGoal("");
+      setCreateProjectBusy(false);
+      setCreateProjectOpen(true);
+      if (!sameProjectPath(projectCwdRef.current, cwd) && looksLikeProject(cwd)) {
+        setProjectCwd(cwd);
+      }
+    };
+    if (looksLikeProject(projectCwdRef.current)) {
+      create(projectCwdRef.current);
+      return;
+    }
+    void pickFolder().then((path) => {
+      if (path) create(normalizeProjectPath(path));
+    });
+  }, []);
+
+  const onSubmitCreateProject = useCallback(async () => {
+    const cwd = projectCwdRef.current;
+    const name = createProjectName.trim();
+    if (!looksLikeProject(cwd) || !name || createProjectBusy) return;
+    setCreateProjectBusy(true);
+    try {
+      const saved = await saveAgentProject(
+        createAgentProject(cwd, name, createProjectGoal.trim()),
+      );
+      setAgentProjects((current) => [
+        ...current.filter((entry) => entry.id !== saved.id),
+        saved,
+      ]);
+      setCreateProjectOpen(false);
+      if (saved.goal.trim()) {
+        setAgentProjectsViewOpen(true);
+        await startProjectAgentRef.current(
+          saved,
+          "coordinator",
+          coordinatorPrompt(saved),
+          saved.name,
+        );
+      } else {
+        switchAgentProject(saved);
+      }
+    } catch (error: unknown) {
+      void message(String(error), { title: "New project", kind: "error" });
+    } finally {
+      setCreateProjectBusy(false);
+    }
+  }, [createProjectBusy, createProjectGoal, createProjectName, switchAgentProject]);
+
+  const onArchiveAgentProject = useCallback(
+    (id: string, archived: boolean) => {
+      const project = agentProjectsRef.current.find((entry) => entry.id === id);
+      if (!project) return;
+      void saveAgentProject({ ...project, archived })
+        .then((saved) => {
+          setAgentProjects((current) =>
+            current.map((entry) => (entry.id === saved.id ? saved : entry)),
+          );
+          if (archived && activeProjectIdRef.current === id) {
+            const next = agentProjectsRef.current.find(
+              (entry) => entry.id !== id && !entry.archived,
+            );
+            if (next) switchAgentProject(next);
+            else {
+              activeProjectIdRef.current = undefined;
+              setActiveProjectId(undefined);
+              setProjectCwd("~");
+            }
+          }
+        })
+        .catch((error: unknown) => {
+          void message(String(error), { title: "Projects", kind: "error" });
+        });
+    },
+    [switchAgentProject],
+  );
+
+  const onDeleteAgentProject = useCallback(
+    (id: string) => {
+      const project = agentProjectsRef.current.find((entry) => entry.id === id);
+      if (!project) return;
+      void ask(
+        `Delete “${project.name}”? Shared context and schedules are removed. Existing chats are kept.`,
+        { title: "Delete project", kind: "warning" },
+      ).then((keep) => {
+        if (keep === false) return;
+        void deleteAgentProject(id, "keep")
+          .then(() => {
+            setAgentProjects((current) =>
+              current.filter((entry) => entry.id !== id),
+            );
+            if (activeProjectIdRef.current === id) {
+              const next = agentProjectsRef.current.find(
+                (entry) => entry.id !== id && !entry.archived,
+              );
+              if (next) switchAgentProject(next);
+              else {
+                activeProjectIdRef.current = undefined;
+                setActiveProjectId(undefined);
+                setProjectCwd("~");
+              }
+            }
+          })
+          .catch((error: unknown) => {
+            void message(String(error), { title: "Projects", kind: "error" });
+          });
+      });
+    },
+    [switchAgentProject],
+  );
+
+  const onRenameAgentProject = useCallback((id: string, name: string) => {
+    const project = agentProjectsRef.current.find((entry) => entry.id === id);
+    if (!project || !name.trim()) return;
+    void saveAgentProject({ ...project, name: name.trim() })
+      .then((saved) => {
+        setAgentProjects((current) =>
+          current.map((entry) => (entry.id === saved.id ? saved : entry)),
+        );
+      })
+      .catch((error: unknown) => {
+        void message(String(error), { title: "Projects", kind: "error" });
+      });
+  }, []);
+
+  const onSelectProject = useCallback(
+    (path: string) => {
+      const normalized = normalizeProjectPath(path);
+      if (!looksLikeProject(normalized)) return;
+      void ensureDefaultAgentProject(normalized, projectName(normalized))
+        .then((project) => {
+          setAgentProjects((current) =>
+            current.some((entry) => entry.id === project.id)
+              ? current.map((entry) =>
+                  entry.id === project.id ? project : entry,
+                )
+              : [...current, project],
+          );
+          switchAgentProject(project);
+        })
+        .catch((error: unknown) => {
+          void message(String(error), {
+            title: "Open project",
+            kind: "error",
+          });
+        });
+    },
+    [switchAgentProject],
   );
 
   const pickProject = useCallback(async () => {
@@ -3406,7 +3837,12 @@ export default function App({
           }
           lastPersisted.current.delete(session.id);
         }
-        void removeProjectData(normalized);
+        void removeProjectData(normalized).catch((error: unknown) => {
+          void message(String(error), {
+            title: "Remove project",
+            kind: "error",
+          });
+        });
       } else {
         for (const session of projectSessions) {
           if (session.busy) continue;
@@ -3552,6 +3988,73 @@ export default function App({
       })();
     },
     [activeTabId],
+  );
+
+  const onOpenProjectDocument = useCallback(
+    (document: AgentProjectDocument) => {
+      const tab = tabsRef.current.find(
+        (entry) => entry.id === activeTabIdRef.current,
+      );
+      const projectId = activeProjectIdRef.current;
+      if (!tab || !projectId) return;
+      const file = newProjectDocumentTab(projectCwdRef.current, {
+        projectId,
+        documentId: document.id,
+        name: document.name,
+      });
+      setTabs((prev) =>
+        prev.map((entry) =>
+          entry.id === tab.id ? openEditorTab(entry, file) : entry,
+        ),
+      );
+      setComposerFocused(false);
+    },
+    [],
+  );
+
+  const onAssignSessionsToProject = useCallback(
+    async (sessionIds: readonly string[], projectId: string) => {
+      const project = agentProjectsRef.current.find(
+        (entry) => entry.id === projectId,
+      );
+      if (!project || project.archived) return;
+      try {
+        for (const sessionId of sessionIds) {
+          await assignSessionProject(sessionId, projectId);
+        }
+        setSessions((prev) =>
+          prev.map((session) =>
+            sessionIds.includes(session.id)
+              ? { ...session, projectId }
+              : session,
+          ),
+        );
+        const nextMembers = [
+          ...project.members.filter(
+            (member) => !sessionIds.includes(member.sessionId),
+          ),
+          ...sessionIds.map((sessionId) => {
+            const session = sessionsRef.current.find(
+              (entry) => entry.id === sessionId,
+            );
+            return {
+              sessionId,
+              role: "worker" as const,
+              title: session?.title || "Chat",
+            };
+          }),
+        ];
+        if (nextMembers.length > 64) {
+          throw new Error(
+            "This project has 64 linked agents. Unlink finished workers first.",
+          );
+        }
+        await saveAgentProject({ ...project, members: nextMembers });
+      } catch (error: unknown) {
+        void message(String(error), { title: "Projects", kind: "error" });
+      }
+    },
+    [],
   );
 
   const onOpenPlan = useCallback(
@@ -3818,11 +4321,19 @@ export default function App({
         void (async () => {
           try {
             const prepared = await prepareAttachments(attachments);
-            const prompt = await preparePrompt(harnessText, {
+            const preparedPrompt = await preparePrompt(harnessText, {
               harness: current.harness,
               sessionId,
               cwd: workCwd,
             });
+            const prompt = rawCommand
+              ? preparedPrompt
+              : await applyAgentProjectContext(
+                  preparedPrompt,
+                  sessionId,
+                  current.cwd,
+                  current.projectId ?? activeProjectIdRef.current,
+                );
             await steerHarnessTurn({
               harness: current.harness,
               sessionId,
@@ -4077,7 +4588,7 @@ export default function App({
         let buildSucceeded = false;
         try {
           const prepared = await prepareAttachments(attachments);
-          const prompt =
+          const preparedPrompt =
             intent === "build" && approvedPlan
               ? buildPlanPrompt(approvedPlan.text)
               : await preparePrompt(harnessText, {
@@ -4085,6 +4596,14 @@ export default function App({
                   sessionId,
                   cwd: workCwd,
                 });
+          const prompt = rawCommand
+            ? preparedPrompt
+            : await applyAgentProjectContext(
+                preparedPrompt,
+                sessionId,
+                current.cwd,
+                current.projectId ?? activeProjectIdRef.current,
+              );
           const turnPrompt =
             intent === "plan" && !rawCommand ? planTurnPrompt(prompt) : prompt;
           const earlier = queuedHandoff
@@ -4208,6 +4727,125 @@ export default function App({
       })();
     },
     [enqueueHarnessEvent, flushHarnessEvents],
+  );
+
+  const startingProjectAgents = useRef(new Set<string>());
+  const startProjectAgentRef = useRef<
+    (
+      project: AgentProject,
+      role: "coordinator" | "worker",
+      prompt: string,
+      title: string,
+      subscription?: AgentProjectSubscription,
+    ) => Promise<void>
+  >(async () => {});
+  const startProjectAgent = useCallback(
+    async (
+      project: AgentProject,
+      role: "coordinator" | "worker",
+      prompt: string,
+      title: string,
+      subscription?: AgentProjectSubscription,
+    ) => {
+      if (startingProjectAgents.current.has(project.id)) {
+        throw new Error(
+          "Another agent is starting in this project. Try again.",
+        );
+      }
+      startingProjectAgents.current.add(project.id);
+      try {
+        const latest = (await loadAgentProjects(project.cwd)).find(
+          (entry) => entry.id === project.id,
+        );
+        if (!latest || latest.archived) {
+          throw new Error("This project was deleted or archived.");
+        }
+        if (subscription) {
+          if (
+            loadArchivedProjects().some((entry) =>
+              sameProjectPath(entry.path, latest.cwd),
+            )
+          )
+            return;
+          if (
+            !latest.subscriptions.some(
+              (entry) => entry.id === subscription.id && entry.enabled,
+            )
+          )
+            return;
+        }
+        const coordinator = latest.members.find(
+          (member) => member.role === "coordinator",
+        );
+        if (role === "coordinator" && coordinator) {
+          const existing = await ensureOpenSession(coordinator.sessionId);
+          if (existing && sameProjectPath(existing.cwd, latest.cwd)) {
+            await onSelectHistorySession(existing.id);
+            return;
+          }
+        }
+        const session = newAgentProjectSession(latest, prompt, title);
+        if (latest.members.length >= 64 && role === "worker") {
+          throw new Error(
+            "This project has 64 linked agents. Remove finished workers from Projects → Agents before starting another run; their chats will be kept.",
+          );
+        }
+        if (subscription) {
+          session.composerSeed = undefined;
+          await probeHarnessAvailability();
+          if (!isHarnessAvailable(session.harness)) {
+            throw new Error(harnessUnavailableHint(session.harness));
+          }
+        }
+        await saveAgentProject({
+          ...latest,
+          members: [
+            ...latest.members.filter(
+              (member) =>
+                role !== "coordinator" || member.role !== "coordinator",
+            ),
+            { sessionId: session.id, role, title: session.title },
+          ],
+        });
+        activeProjectIdRef.current = latest.id;
+        setActiveProjectId(latest.id);
+        const tab = newTab(session.id);
+        sessionsRef.current = [...sessionsRef.current, session];
+        setSessions(sessionsRef.current);
+        appendTab(tab, session.cwd);
+        if (subscription) {
+          // Each occurrence gets its own supervised session; never steer an
+          // existing coordinator or inherit a user's full-access permissions.
+          onSubmit(session.id, prompt, [], { followUpBehavior: "queue" });
+        } else {
+          setAgentProjectsViewOpen(true);
+          setProjectCwd(session.cwd);
+          setRecents(rememberProject(session.cwd));
+          setSidebarTab("sessions");
+          setActiveTabId(tab.id);
+          setComposerFocused(true);
+        }
+      } finally {
+        startingProjectAgents.current.delete(project.id);
+      }
+    },
+    [appendTab, ensureOpenSession, newTab, onSelectHistorySession, onSubmit],
+  );
+  startProjectAgentRef.current = startProjectAgent;
+
+  const runProjectSubscription = useCallback(
+    (project: AgentProject, subscription: AgentProjectSubscription) =>
+      startProjectAgent(
+        project,
+        "worker",
+        `Scheduled project task: ${subscription.name}\n\n${subscription.prompt}`,
+        `${project.name} · ${subscription.name}`,
+        subscription,
+      ),
+    [startProjectAgent],
+  );
+  const projectSubscriptions = useAgentProjectSubscriptions(
+    runProjectSubscription,
   );
 
   const onUpdatePlan = useCallback(
@@ -4736,13 +5374,15 @@ export default function App({
   const onQuestionInteraction = useCallback(
     (sessionId: string, requestId: number) => {
       const session = sessionsRef.current.find((s) => s.id === sessionId);
-      if (session) keepHarnessQuestionOpen(session.harness, sessionId, requestId);
+      if (session)
+        keepHarnessQuestionOpen(session.harness, sessionId, requestId);
     },
     [],
   );
 
   const onOpenApprovalSession = useCallback(
     (sessionId: string) => {
+      setAgentProjectsViewOpen(false);
       if (!focusOpenSession(sessionId)) {
         void onSelectHistorySession(sessionId);
       }
@@ -4760,8 +5400,24 @@ export default function App({
     [onOpenApprovalSession],
   );
 
+  const activeAgentProject = agentProjects.find(
+    (entry) => entry.id === activeProjectId,
+  );
+  const coordinatorHome = activeAgentProject
+    ? coordinatorMember(activeAgentProject)
+    : undefined;
   const nextTitleTabs: TitleTab[] = deckProjectTabs.map((tab) =>
-    toTitleTab(tab, sessions, dirtyFiles),
+    toTitleTab(
+      tab,
+      sessions,
+      dirtyFiles,
+      coordinatorHome && activeAgentProject
+        ? {
+            sessionId: coordinatorHome.sessionId,
+            name: activeAgentProject.name,
+          }
+        : undefined,
+    ),
   );
   tabProjectsRef.current = new Map(
     nextTitleTabs.map((tab) => [tab.id, tab.project]),
@@ -4781,15 +5437,21 @@ export default function App({
 
   const sidebarHistory = useMemo(
     () =>
-      historyWithLiveSessions(history, sessions, sidebarCwd, {
-        ...(projectBranches?.current
-          ? { branch: projectBranches.current }
-          : {}),
-        ...(sidebarCwd && sidebarCwd !== "~"
-          ? { repo: projectName(sidebarCwd) }
-          : {}),
-      }),
-    [history, projectBranches, sessions, sidebarCwd],
+      historyWithLiveSessions(
+        history,
+        sessions,
+        sidebarCwd,
+        {
+          ...(projectBranches?.current
+            ? { branch: projectBranches.current }
+            : {}),
+          ...(sidebarCwd && sidebarCwd !== "~"
+            ? { repo: projectName(sidebarCwd) }
+            : {}),
+        },
+        activeProjectId,
+      ),
+    [history, projectBranches, sessions, sidebarCwd, activeProjectId],
   );
   const inboxRelatedSessions = useMemo(() => {
     const byId = new Map<string, SessionSummary>();
@@ -4857,6 +5519,7 @@ export default function App({
   }, []);
 
   const onGoToFile = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
@@ -4864,6 +5527,7 @@ export default function App({
   }, []);
 
   const onFindInProject = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
@@ -4873,6 +5537,7 @@ export default function App({
   }, []);
 
   const onOpenSearch = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setFilePickerOpen(false);
     setSettingsOpen(false);
     setInboxViewOpen(false);
@@ -4886,6 +5551,7 @@ export default function App({
   }, []);
 
   const onOpenInbox = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setFilePickerOpen(false);
     setSettingsOpen(false);
     setSearchViewOpen(false);
@@ -4895,6 +5561,7 @@ export default function App({
   }, []);
 
   const onOpenLinkedWorkItem = useCallback((item: LinkedWorkItem) => {
+    setAgentProjectsViewOpen(false);
     setFilePickerOpen(false);
     setSettingsOpen(false);
     setSearchViewOpen(false);
@@ -4920,6 +5587,7 @@ export default function App({
 
   const onOpenNotes = useCallback(() => {
     if (!loadNotesEnabled()) return;
+    setAgentProjectsViewOpen(false);
     setFilePickerOpen(false);
     setSettingsOpen(false);
     setSearchViewOpen(false);
@@ -4931,8 +5599,18 @@ export default function App({
     setNotesViewOpen(false);
   }, []);
 
+  const onOpenAgentProjects = useCallback(() => {
+    setFilePickerOpen(false);
+    setSettingsOpen(false);
+    setSearchViewOpen(false);
+    setInboxViewOpen(false);
+    setNotesViewOpen(false);
+    setAgentProjectsViewOpen(true);
+  }, []);
+
   const openSettings = useCallback(
     (section?: SettingsSectionId, anchor?: SettingsAnchor) => {
+      setAgentProjectsViewOpen(false);
       setFilePickerOpen(false);
       setSearchViewOpen(false);
       setInboxViewOpen(false);
@@ -4972,6 +5650,10 @@ export default function App({
   );
 
   const onRailBack = useCallback(() => {
+    if (agentProjectsViewOpen) {
+      setAgentProjectsViewOpen(false);
+      return;
+    }
     if (settingsOpen) {
       setSettingsOpen(false);
       return;
@@ -4989,9 +5671,17 @@ export default function App({
       return;
     }
     onVisitBack();
-  }, [onVisitBack, searchViewOpen, settingsOpen, inboxViewOpen, notesViewOpen]);
+  }, [
+    onVisitBack,
+    searchViewOpen,
+    settingsOpen,
+    inboxViewOpen,
+    notesViewOpen,
+    agentProjectsViewOpen,
+  ]);
 
   const onRailForward = useCallback(() => {
+    setAgentProjectsViewOpen(false);
     setSearchViewOpen(false);
     setSettingsOpen(false);
     setInboxViewOpen(false);
@@ -5056,15 +5746,24 @@ export default function App({
 
   const onNavigateProjectList = useCallback(
     (delta: number) => {
-      const current = normalizeProjectPath(projectCwdRef.current);
-      const ids = projectRailItems(loadRecents(), current).map(
-        (project) => project.path,
+      const records = agentProjectsRef.current.filter(
+        (project) => !project.archived,
       );
+      if (records.length > 0) {
+        const current = activeProjectIdRef.current ?? records[0]?.id;
+        const ids = records.map((project) => project.id);
+        const next = adjacentItemId(ids, current, delta);
+        if (!next || next === current) return;
+        onSelectAgentProject(next);
+        return;
+      }
+      const current = normalizeProjectPath(projectCwdRef.current);
+      const ids = loadRecents().map((project) => project.path);
       const next = adjacentItemId(ids, current, delta);
       if (!next || sameProjectPath(next, current)) return;
       onSelectProject(next);
     },
-    [onSelectProject],
+    [onSelectAgentProject, onSelectProject],
   );
 
   const actions = useRef({
@@ -5178,6 +5877,7 @@ export default function App({
             searchViewOpenRef.current ||
             inboxViewOpenRef.current ||
             notesViewOpenRef.current ||
+            agentProjectsViewOpenRef.current ||
             settingsOpenRef.current ||
             filePickerOpenRef.current ||
             Boolean(whatsNewVersionRef.current);
@@ -5252,6 +5952,7 @@ export default function App({
         !searchViewOpenRef.current &&
         !inboxViewOpenRef.current &&
         !notesViewOpenRef.current &&
+        !agentProjectsViewOpenRef.current &&
         handleEditorFindKey(e)
       ) {
         e.stopPropagation();
@@ -5485,6 +6186,7 @@ export default function App({
         onCancelReminders={sessionReminders.cancel}
         onDeleteSession={onDeleteHistorySession}
         onDeleteSessions={onDeleteHistorySessions}
+        onAssignSessionsToProject={onAssignSessionsToProject}
         onOpenFile={onOpenFile}
         onOpenTerminal={onOpenTerminal}
         onFileMoved={onFileMoved}
@@ -5494,7 +6196,8 @@ export default function App({
           searchViewOpen ||
           settingsOpen ||
           inboxViewOpen ||
-          notesViewOpen
+          notesViewOpen ||
+          agentProjectsViewOpen
         }
         canGoForward={tabVisitNav.canForward}
         onGoBack={onRailBack}
@@ -5518,6 +6221,16 @@ export default function App({
         onSelectProject={onSelectProject}
         onOpenProject={pickProject}
         onRemoveProject={onRemoveProject}
+        agentProjects={projectsReady ? agentProjects : undefined}
+        activeProjectId={activeProjectId}
+        onSelectAgentProject={onSelectAgentProject}
+        onCreateAgentProject={onCreateAgentProject}
+        onProjectOverview={onOpenAgentProjects}
+        onArchiveAgentProject={onArchiveAgentProject}
+        onDeleteAgentProject={onDeleteAgentProject}
+        onRenameAgentProject={onRenameAgentProject}
+        busyProjectIds={busyProjectIds}
+        approvalProjectIds={approvalProjectIds}
         onNew={onNew}
         openSessions={openProjectSessions}
         onNewTerminal={onNewTerminal}
@@ -5544,14 +6257,50 @@ export default function App({
       />
 
       <div className="body-glass flex min-h-0 min-w-0 flex-1 flex-col">
+        {projectsError ? (
+          <div
+            role="alert"
+            className="flex items-center gap-3 border-b border-content/10 bg-background-base px-4 py-2 text-xs text-content/70"
+          >
+            <span className="min-w-0 flex-1">{projectsError}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded px-2 py-1 hover:bg-content/8"
+              onClick={() => setProjectsError(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+        {projectSubscriptions.error ? (
+          <div
+            role="alert"
+            className="flex items-center gap-3 border-b border-content/10 bg-background-base px-4 py-2 text-xs text-content/70"
+          >
+            <span className="min-w-0 flex-1">{projectSubscriptions.error}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded px-2 py-1 hover:bg-content/8"
+              onClick={projectSubscriptions.dismissError}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         <div
           className={
-            searchViewOpen || settingsOpen || inboxViewOpen || notesViewOpen
+            searchViewOpen ||
+            settingsOpen ||
+            inboxViewOpen ||
+            notesViewOpen
               ? "hidden"
               : "flex min-h-0 min-w-0 flex-1 flex-col"
           }
           aria-hidden={
-            searchViewOpen || settingsOpen || inboxViewOpen || notesViewOpen
+            searchViewOpen ||
+            settingsOpen ||
+            inboxViewOpen ||
+            notesViewOpen
           }
           inert={
             searchViewOpen ||
@@ -5605,6 +6354,12 @@ export default function App({
             projectTerminalActive={
               !!currentProjectDock && currentProjectDock.pane.files.length > 0
             }
+            onToggleProjectPane={
+              activeProjectId
+                ? () => setAgentProjectsViewOpen((open) => !open)
+                : undefined
+            }
+            projectPaneActive={agentProjectsViewOpen}
             onOpenSettings={onOpenSettings}
             onOpenInbox={onOpenInbox}
             onOpenNotes={notesEnabled ? onOpenNotes : undefined}
@@ -5712,6 +6467,46 @@ export default function App({
                     </div>
                   ))}
                 </div>
+                {agentProjectsViewOpen && activeProjectId ? (
+                  <div
+                    ref={projectPaneResize.setPaneRef}
+                    className="relative flex h-full min-h-0 shrink-0 flex-col"
+                    style={{ width: projectPaneResize.width }}
+                  >
+                    <div
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label="Resize project pane"
+                      onPointerDown={projectPaneResize.onPointerDown}
+                      className="absolute inset-y-0 left-0 z-10 w-1 cursor-col-resize hover:bg-accent/40"
+                    />
+                    <AgentProjectsView
+                      cwd={projectCwd}
+                      activeProjectId={activeProjectId}
+                      variant="pane"
+                      besideRail={projectRailOpen}
+                      onClose={() => setAgentProjectsViewOpen(false)}
+                      sessions={[...history, ...openProjectSessions]}
+                      busySessionIds={busySessionIds}
+                      onOpenSession={(id) => {
+                        void ensureOpenSession(id)
+                          .then(async (session) => {
+                            if (session) await onSelectHistorySession(id);
+                          })
+                          .catch((error: unknown) => {
+                            void message(String(error), {
+                              title: "Projects",
+                              kind: "error",
+                            });
+                          });
+                      }}
+                      onOpenDocument={(document) =>
+                        onOpenProjectDocument(document)
+                      }
+                      onStartSession={startProjectAgent}
+                    />
+                  </div>
+                ) : null}
               </div>
             </div>
           </main>
@@ -5772,6 +6567,7 @@ export default function App({
             onOpenIntegrations={onOpenInboxIntegrations}
           />
         ) : null}
+
         {notesViewOpen ? (
           <NotesView
             besideRail={projectRailOpen}
@@ -5811,6 +6607,68 @@ export default function App({
           />
         )}
       </div>
+
+      {createProjectOpen ? (
+        <Modal
+          title="New project"
+          description="Name it, say what you want built, and you land in the coordinator chat."
+          size="sm"
+          onClose={() => {
+            if (!createProjectBusy) setCreateProjectOpen(false);
+          }}
+        >
+          <form
+            className="flex flex-col gap-3 p-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void onSubmitCreateProject();
+            }}
+          >
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-content/65">
+              Name
+              <input
+                required
+                autoFocus
+                maxLength={160}
+                value={createProjectName}
+                disabled={createProjectBusy}
+                onChange={(event) => setCreateProjectName(event.target.value)}
+                className="rounded-lg border border-content/15 bg-background-base px-3 py-2 text-sm text-content"
+                placeholder="Launch the next release"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-content/65">
+              What should we build?
+              <textarea
+                value={createProjectGoal}
+                disabled={createProjectBusy}
+                onChange={(event) => setCreateProjectGoal(event.target.value)}
+                className="min-h-24 rounded-lg border border-content/15 bg-background-base px-3 py-2 text-sm text-content"
+                placeholder="The first message to the coordinator. Leave empty for a plain workspace."
+              />
+            </label>
+            <p className="truncate font-mono text-[11px] text-content/40">
+              {projectCwd}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-lg border border-content/10 px-3 py-2 text-sm text-content/75 hover:bg-content/8"
+                disabled={createProjectBusy}
+                onClick={() => setCreateProjectOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-lg border border-accent/20 bg-accent/15 px-3 py-2 text-sm text-accent hover:bg-accent/25 disabled:opacity-40"
+                disabled={createProjectBusy || !createProjectName.trim()}
+              >
+                {createProjectBusy ? "Creating…" : "Create project"}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      ) : null}
 
       {filePickerOpen ? (
         <FilePicker
@@ -5896,6 +6754,7 @@ function toTitleTab(
   tab: WorkspaceTab,
   sessions: Session[],
   dirtyFiles: Set<string>,
+  home?: { sessionId: string; name: string },
 ): TitleTab {
   const paneIds = leafIds(tab.layout);
   const multiPane = paneIds.length > 1;
@@ -5979,15 +6838,23 @@ function toTitleTab(
     pane.files.some(isTerminalTab),
   );
   const focusedFile = focusedFileTab(tab);
+  const isHome = !!home && paneIds.includes(home.sessionId);
+  const homeFocused = isHome && tab.focusedId === home.sessionId;
 
   return {
     id: tab.id,
-    project: focused
-      ? projectName(focused.cwd)
-      : focusedFile
-        ? projectName(focusedFile.cwd)
-        : "~",
-    title: focused ? conversationTitle(focused) : "",
+    project: isHome
+      ? home.name
+      : focused
+        ? projectName(focused.cwd)
+        : focusedFile
+          ? projectName(focusedFile.cwd)
+          : "~",
+    title: homeFocused
+      ? home.name
+      : focused
+        ? conversationTitle(focused)
+        : "",
     more,
     sessionCount: tabSessions.length,
     harnesses,

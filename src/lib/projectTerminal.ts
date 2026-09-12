@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 import {
+  leafIds,
   newEditorPane,
   nextTerminalTitleFromFiles,
   type EditorPane,
@@ -15,11 +16,12 @@ import {
   applyTerminalMeta,
   type TerminalMetaPatch,
 } from "./terminalTab";
-import { workspaceTabCwd } from "./workspaceTabGroups";
+import { workspaceTabCwd, workspaceTabProjectId } from "./workspaceTabGroups";
 
 export type DockSide = "top" | "bottom" | "left" | "right";
 
 export type ProjectTerminalDock = {
+  projectId?: string;
   projectPath: string;
   pane: EditorPane;
   side: DockSide;
@@ -73,16 +75,24 @@ export function clampDockSize(
 export function findProjectTerminal(
   docks: ProjectTerminalDock[],
   projectPath: string,
+  projectId?: string,
 ): ProjectTerminalDock | undefined {
-  return docks.find((dock) => sameProjectPath(dock.projectPath, projectPath));
+  return docks.find((dock) => matchesProject(dock, projectPath, projectId));
+}
+
+function matchesProject(dock: ProjectTerminalDock, path: string, projectId?: string): boolean {
+  if (dock.projectId || projectId) return !!dock.projectId && dock.projectId === projectId;
+  return sameProjectPath(dock.projectPath, path);
 }
 
 export function createProjectTerminal(
   projectPath: string,
   file: FilePaneTab,
   side: DockSide = "bottom",
+  projectId?: string,
 ): ProjectTerminalDock {
   return {
+    ...(projectId ? { projectId } : {}),
     projectPath: normalizeProjectPath(projectPath),
     pane: newEditorPane(file),
     side,
@@ -182,11 +192,12 @@ export function mapProjectTerminal(
   docks: ProjectTerminalDock[],
   projectPath: string,
   update: (dock: ProjectTerminalDock) => ProjectTerminalDock | null,
+  projectId?: string,
 ): ProjectTerminalDock[] {
   let found = false;
   const next: ProjectTerminalDock[] = [];
   for (const dock of docks) {
-    if (!sameProjectPath(dock.projectPath, projectPath)) {
+    if (!matchesProject(dock, projectPath, projectId)) {
       next.push(dock);
       continue;
     }
@@ -305,7 +316,7 @@ export function splitProjectTerminalsForMove(
   const moving: ProjectTerminalDock[] = [];
   const remaining: ProjectTerminalDock[] = [];
   for (const dock of docks) {
-    const path = normalizeProjectPath(dock.projectPath);
+    const path = dock.projectId ? `project:${dock.projectId}` : normalizeProjectPath(dock.projectPath);
     const stays = remainingProjects.has(path);
     const follows = movingProjects.has(path) && !stays;
     if (follows) moving.push(dock);
@@ -320,6 +331,12 @@ function projectPathsOf(
 ): Set<string> {
   const paths = new Set<string>();
   for (const tab of tabs) {
+    const projectId = workspaceTabProjectId(tab, sessions);
+    if (projectId) {
+      paths.add(`project:${projectId}`);
+      continue;
+    }
+    if (sessions.some((session) => session.projectId && leafIds(tab.layout).includes(session.id))) continue;
     const cwd = workspaceTabCwd(tab, sessions);
     if (cwd) paths.add(normalizeProjectPath(cwd));
   }

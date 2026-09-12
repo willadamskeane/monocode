@@ -42,6 +42,20 @@ This is very early and you should expect bugs.
 
 Small, focused pull requests are welcome. Anything large is worth an issue first - see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Agent projects
+
+The **Projects** list in the sidebar is the switcher. Opening a repository creates a workspace project (MonoCode's previous folder rail; Cursor's Open Folder). **New project** starts an initiative in that checkout: a coordinator, workers, shared context, and schedules (Cursor's [Projects](https://cursor.com/blog/projects), local-only). Multiple initiatives can share a repository.
+
+- Open a repository to work in it, or choose **New project** for a named body of work in the same checkout.
+- A goal becomes the coordinator's first message and opens that chat, with the Project pane beside it. Delegate workers from the pane; review the draft and send from the normal composer.
+- Save shared instructions and context documents. Project members receive the latest saved context and bounded excerpts from other members' completed replies on each turn, including when switching providers. The coordinator can delegate through the selected provider's native subagent tools where supported.
+- Add opt-in, recurring **local subscriptions**. Each occurrence starts a fresh supervised worker using your default provider while MonoCode is open. Missed intervals are coalesced, not replayed. Workers may run in parallel in the same checkout, so review concurrent edits carefully. Errors appear in the workspace.
+- Archive a project to pause its subscriptions. Deleting an agent project removes its context and schedules, but keeps its conversations and repository files.
+
+Project metadata and context stay in MonoCode's local database; context is sent to your selected provider when a member runs. This does **not** provide cloud computers, cross-machine file synchronization, Slack/GitHub event subscriptions, or execution while MonoCode is closed. Context documents are saved reference text, not automatically synchronized repository files. Unsent drafts follow the normal session lifecycle.
+
+Each project supports 20 context documents, 20 subscriptions, and 64 linked agents. Remove finished workers from **Agents** to make room for new or scheduled runs; their saved chats are retained.
+
 ## Build from source
 
 Supports macOS, Linux, and Windows.

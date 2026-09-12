@@ -9,6 +9,7 @@ import {
   type FilePaneTab,
   type LayoutNode,
   type PlanTabSource,
+  type ProjectDocumentSource,
   type SessionChangesSource,
   type WorkspaceTab,
 } from "./layout";
@@ -32,6 +33,8 @@ import {
 } from "./session";
 
 export type WorkspaceSessionStub = {
+  projectId?: string;
+  composerSeed?: string;
   inboxAsk?: InboxAskContext;
   id: string;
   cwd: string;
@@ -50,6 +53,7 @@ export type WorkspaceSnapshot = {
   sessions: WorkspaceSessionStub[];
   activeTabId: string;
   projectCwd: string;
+  activeProjectId?: string;
   projectTerminals: ProjectTerminalDock[];
   projectReturnTargets?: { projectPath: string; tabId?: string; paneId?: string }[];
 };
@@ -61,12 +65,14 @@ export function collectWorkspaceSnapshot(
   projectCwd: string,
   memory: ProjectReturnMemory,
   projectTerminals: ProjectTerminalDock[] = [],
+  activeProjectId?: string,
 ): WorkspaceSnapshot {
   const snapshot = withoutInboxSessions({
     tabs: tabs.map(sanitizeTab).filter((tab): tab is WorkspaceTab => tab != null),
     sessions: sessions.map(sessionStub).filter((stub): stub is WorkspaceSessionStub => stub != null),
     activeTabId,
     projectCwd: projectCwd.trim() || "~",
+    ...(validProjectId(activeProjectId) ? { activeProjectId } : {}),
     projectTerminals: projectTerminals
       .map(sanitizeProjectTerminal)
       .filter((dock): dock is ProjectTerminalDock => dock != null),
@@ -106,7 +112,13 @@ function parseProjectReturnTargets(raw: unknown): ProjectReturnMemory {
       (entry as { tabId?: unknown }).tabId;
     if (typeof remembered !== "string" || !remembered.trim()) continue;
 
-    memory.set(pathKey(projectPath), remembered.trim());
+    if (projectPath.startsWith("project:")) {
+      if (validProjectId(projectPath.slice("project:".length))) {
+        memory.set(projectPath, remembered.trim());
+      }
+    } else {
+      memory.set(pathKey(projectPath), remembered.trim());
+    }
   }
   return memory;
 }
@@ -140,6 +152,7 @@ export function parseWorkspaceSnapshot(raw: unknown): WorkspaceSnapshot | null {
     sessions?: unknown;
     activeTabId?: unknown;
     projectCwd?: unknown;
+    activeProjectId?: unknown;
     projectTerminals?: unknown;
     projectReturnTargets?: unknown;
   };
@@ -167,7 +180,10 @@ export function parseWorkspaceSnapshot(raw: unknown): WorkspaceSnapshot | null {
         .map(sanitizeProjectTerminal)
         .filter((dock): dock is ProjectTerminalDock => dock != null)
     : [];
-  const snapshot = withoutInboxSessions({ tabs, sessions, activeTabId, projectCwd, projectTerminals });
+  const snapshot = withoutInboxSessions({
+    tabs, sessions, activeTabId, projectCwd, projectTerminals,
+    ...(validProjectId(value.activeProjectId) ? { activeProjectId: value.activeProjectId } : {}),
+  });
   return snapshot.tabs.length > 0
     ? withProjectReturnTargets(
         snapshot,
@@ -207,7 +223,13 @@ export function hydrateWorkspaceSnapshot(
     if (existing) return existing;
     const record = loaded.get(id);
     const stub = stubs.get(id);
-    const base = record ?? (stub ? sessionFromStub(stub) : null);
+    const base = record
+      ? {
+          ...record,
+          ...(!record.projectId && stub?.projectId ? { projectId: stub.projectId } : {}),
+          ...(stub?.composerSeed !== undefined ? { composerSeed: stub.composerSeed } : {}),
+        }
+      : (stub ? sessionFromStub(stub) : null);
     if (!base || base.inboxAsk) return null;
     const next = interruptedIds.has(id) ? markTurnInterrupted(base) : { ...base, busy: false };
     sessions.set(id, next);
@@ -225,6 +247,7 @@ export function hydrateWorkspaceSnapshot(
         sessionFromStub({
           id,
           cwd: parsed.projectCwd,
+          ...(tab.projectId ? { projectId: tab.projectId } : {}),
           harness: "cursor",
           model: "",
           modelSettings: {},
@@ -240,7 +263,7 @@ export function hydrateWorkspaceSnapshot(
     const session = take(id);
     if (!session || session.inboxAsk) continue;
     if (tabs.some((tab) => leafIds(tab.layout).includes(id))) continue;
-    tabs.push(newTab(id));
+    tabs.push(newTab(id, session.projectId));
   }
 
   if (tabs.length === 0) return null;
@@ -257,6 +280,7 @@ export function hydrateWorkspaceSnapshot(
     sessions: [...sessions.values()],
     activeTabId,
     projectCwd,
+    ...(parsed.activeProjectId ? { activeProjectId: parsed.activeProjectId } : {}),
     projectTerminals: parsed.projectTerminals,
     projectReturnMemory: reconcileProjectReturn({
       memory: parseProjectReturnTargets(parsed.projectReturnTargets),
@@ -271,6 +295,8 @@ function sessionStub(session: Session): WorkspaceSessionStub | null {
   if (!session.id) return null;
   return {
     id: session.id,
+    ...(validProjectId(session.projectId) ? { projectId: session.projectId } : {}),
+    ...(typeof session.composerSeed === "string" ? { composerSeed: session.composerSeed } : {}),
     cwd: session.cwd || "~",
     harness: session.harness,
     model: session.model,
@@ -297,6 +323,8 @@ function sessionFromStub(stub: WorkspaceSessionStub): Session {
   return {
     ...session,
     id: stub.id,
+    ...(stub.projectId ? { projectId: stub.projectId } : {}),
+    ...(stub.composerSeed !== undefined ? { composerSeed: stub.composerSeed } : {}),
     title: stub.title,
     ...(stub.inboxAsk ? { inboxAsk: stub.inboxAsk } : {}),
     ...(stub.providerSessionId
@@ -326,6 +354,8 @@ function sanitizeStub(raw: unknown): WorkspaceSessionStub | null {
       : {};
   return {
     id: value.id,
+    ...(validProjectId(value.projectId) ? { projectId: value.projectId } : {}),
+    ...(typeof value.composerSeed === "string" ? { composerSeed: value.composerSeed } : {}),
     cwd:
       typeof value.cwd === "string" && value.cwd.trim() ? value.cwd.trim() : "~",
     harness,
@@ -370,6 +400,7 @@ function sanitizeTab(raw: unknown): WorkspaceTab | null {
   return {
     kind: "session",
     id: value.id,
+    ...(validProjectId(value.projectId) ? { projectId: value.projectId } : {}),
     layout,
     focusedId,
     editorPanes,
@@ -455,6 +486,7 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
   if (typeof value.path !== "string" || !value.path) return null;
   if (typeof value.cwd !== "string" || !value.cwd) return null;
   const plan = sanitizePlan(value.plan);
+  const projectDocument = sanitizeProjectDocument(value.projectDocument);
   const hasReleaseNotes = "releaseNotes" in value;
   const releaseNotes = sanitizeReleaseNotes(value.releaseNotes);
   const hasCommit = "commit" in value;
@@ -500,6 +532,7 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
     path: value.path,
     cwd: value.cwd,
     ...(plan ? { plan } : {}),
+    ...(projectDocument ? { projectDocument } : {}),
     ...(releaseNotes ? { releaseNotes } : {}),
     ...(commit ? { commit } : {}),
     ...(sessionChanges ? { sessionChanges, review: true } : {}),
@@ -562,10 +595,33 @@ function sanitizeProjectTerminal(raw: unknown): ProjectTerminalDock | null {
     : files[0].id;
   return {
     projectPath: normalizeProjectPath(value.projectPath),
+    ...(validProjectId(value.projectId) ? { projectId: value.projectId } : {}),
     pane: { ...pane, files, activeFileId },
     side: value.side,
     size: clampDockSize(value.side, Number(value.size)),
     open: value.open !== false,
+  };
+}
+
+function validProjectId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 &&
+    value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function sanitizeProjectDocument(
+  raw: unknown,
+): ProjectDocumentSource | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.projectId !== "string" || !value.projectId.trim())
+    return undefined;
+  if (typeof value.documentId !== "string" || !value.documentId.trim())
+    return undefined;
+  if (typeof value.name !== "string" || !value.name.trim()) return undefined;
+  return {
+    projectId: value.projectId.trim(),
+    documentId: value.documentId.trim(),
+    name: value.name.trim(),
   };
 }
 

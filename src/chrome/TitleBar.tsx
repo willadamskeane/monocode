@@ -3,6 +3,7 @@ import {
   ChevronRight,
   Inbox,
   PanelLeft,
+  Bot,
   Plus,
   Search,
   Settings,
@@ -73,6 +74,8 @@ type Props = {
   onNewTerminal?: () => void;
   onShowTerminal?: () => void;
   projectTerminalActive?: boolean;
+  onToggleProjectPane?: () => void;
+  projectPaneActive?: boolean;
   onOpenSettings?: () => void;
   onOpenInbox?: () => void;
   onOpenNotes?: () => void;
@@ -549,6 +552,8 @@ function TitleBarComponent({
   onNewTerminal,
   onShowTerminal,
   projectTerminalActive = false,
+  onToggleProjectPane,
+  projectPaneActive = false,
   onOpenSettings,
   onOpenInbox,
   onOpenNotes,
@@ -730,6 +735,16 @@ function TitleBarComponent({
               <Plus className="size-3.5" strokeWidth={1.75} />
             </IconButton>
           </>
+        ) : null}
+        {!projectless && onToggleProjectPane ? (
+          <IconButton
+            label="Project"
+            accent={projectPaneActive}
+            active={projectPaneActive}
+            onClick={onToggleProjectPane}
+          >
+            <Bot className="size-3.5" strokeWidth={1.75} />
+          </IconButton>
         ) : null}
         {!projectless && (onShowTerminal || onNewTerminal) ? (
           <IconButton

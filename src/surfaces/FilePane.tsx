@@ -9,6 +9,7 @@ import {
   isChangesTab,
   isCommitTab,
   isPlanTab,
+  isProjectDocumentTab,
   isReleaseNotesTab,
   isReviewTab,
   isSessionChangesTab,
@@ -26,6 +27,7 @@ import { BuildTargetButton } from "../chrome/SecondOpinionButton";
 import { loadDiffViewer, subscribeDiffViewer } from "../lib/settings";
 import { MarkdownPreview } from "./AgentMarkdown";
 import { BinaryFileView } from "./BinaryFileView";
+import { ProjectDocumentSurface } from "./ProjectDocumentSurface";
 import { CommitDiff } from "./CommitDiff";
 import { FileEditor } from "./FileEditor";
 import { ReleaseNotesSurface } from "./ReleaseNotesSurface";
@@ -154,6 +156,8 @@ function FilePaneComponent({
                   onUpdatePlan={onUpdatePlan}
                   onBuildPlan={onBuildPlan}
                 />
+              ) : isProjectDocumentTab(file) ? (
+                <ProjectDocumentSurface source={file.projectDocument} />
               ) : isReleaseNotesTab(file) ? (
                 <ReleaseNotesSurface source={file.releaseNotes} />
               ) : isTerminalTab(file) ? (

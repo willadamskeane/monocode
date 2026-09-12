@@ -5,6 +5,7 @@ import { clearProjectChatBackgroundSetting } from "./projectChatBackground";
 import { normalizeProjectPath } from "./recents";
 import { deleteSession, listSessionsByProject } from "./sessionStore";
 import { clearTabGroupSettings } from "./tabGroups";
+import { deleteAgentProjectsForCwd } from "./agentProjects";
 
 /** Saved chats filed under this project, so the confirm prompt can count them. */
 export async function projectSessionCount(path: string): Promise<number> {
@@ -15,6 +16,7 @@ export async function projectSessionCount(path: string): Promise<number> {
 /** Everything we persist for a project: saved chats plus its rail appearance. */
 export async function removeProjectData(path: string): Promise<void> {
   const normalized = normalizeProjectPath(path);
+  await deleteAgentProjectsForCwd(normalized);
   const key = projectKey(normalized);
   const sessions = await listSessionsByProject(normalized).catch(() => []);
   for (const session of sessions) {

@@ -73,6 +73,8 @@ pub fn init(app: &AppHandle) -> Result<(), String> {
 #[serde(rename_all = "camelCase")]
 pub struct SessionUpsert {
     pub id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub cwd: String,
     pub harness: String,
     pub model: String,
@@ -99,6 +101,8 @@ pub struct SessionUpsert {
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub cwd: String,
     pub harness: String,
     pub model: String,
@@ -126,6 +130,8 @@ pub struct SessionSummary {
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub cwd: String,
     pub harness: String,
     pub model: String,
@@ -184,6 +190,27 @@ pub fn session_list_by_project(
     }
     let conn = store.conn.lock().map_err(|_| "Session store is locked")?;
     list_by_project(&conn, &cwd).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+pub fn session_list_by_agent_project(
+    store: State<'_, SessionStore>,
+    project_id: String,
+) -> Result<Vec<SessionSummary>, String> {
+    validate_id(&project_id, "project")?;
+    list_by_agent_project(&*store.lock_conn()?, &project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+pub fn session_assign_project(
+    app: AppHandle,
+    store: State<'_, SessionStore>,
+    session_id: String,
+    project_id: String,
+) -> Result<(), String> {
+    assign_project(&*store.lock_conn()?, &session_id, &project_id)?;
+    let _ = app.emit("agent-projects-changed", ());
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -501,6 +528,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ("has_user_message", "INTEGER NOT NULL DEFAULT 0"),
         ("pinned", "INTEGER NOT NULL DEFAULT 0"),
         ("linked_work_item_json", "TEXT"),
+        ("project_id", "TEXT"),
     ] {
         ensure_session_column(conn, column, decl)?;
     }
@@ -602,11 +630,29 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          ON sessions (id) WHERE inbox_ask IS NOT NULL;",
     )?;
     crate::notes::ensure_notes_table(conn)?;
+    crate::agent_projects::ensure_agent_projects_table(conn)?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS sessions_project_id_idx
+           ON sessions(project_id, has_user_message, updated_at DESC);
+         DROP INDEX IF EXISTS sessions_cwd_cover_idx;
+         CREATE INDEX sessions_cwd_cover_idx
+           ON sessions(cwd, has_user_message, updated_at DESC, id, harness,
+             model, runtime_mode, title, provider_session_id, created_at, branch,
+             archived, pinned, linked_work_item_json, project_id);",
+    )?;
+    crate::agent_projects::sync_member_ownership(conn).map_err(ownership_error)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (14, ?1)",
+        params![now_millis()],
+    )?;
     crate::reminders::ensure_table(conn)?;
     Ok(())
 }
 
 fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Result<SessionSummary> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let conn = &*tx;
+    let project_id = resolve_session_owner(conn, session).map_err(ownership_error)?;
     let now = now_millis();
     let model_settings = serde_json::to_string(&session.model_settings)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -669,8 +715,8 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
            id, cwd, harness, model, model_settings, runtime_mode, title,
            provider_session_id, blocks_json, created_at, updated_at, branch,
            context_used, context_window, worktree_cwd, has_user_message,
-           linked_work_item_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+           linked_work_item_json, project_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(id) DO UPDATE SET
            cwd = excluded.cwd,
            harness = excluded.harness,
@@ -686,7 +732,8 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
            context_window = excluded.context_window,
            worktree_cwd = excluded.worktree_cwd,
            has_user_message = excluded.has_user_message,
-           linked_work_item_json = excluded.linked_work_item_json",
+           linked_work_item_json = excluded.linked_work_item_json,
+           project_id = COALESCE(sessions.project_id, excluded.project_id)",
         params![
             session.id,
             session.cwd,
@@ -705,11 +752,13 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
             worktree_cwd,
             i64::from(has_user_message),
             linked_work_item_json,
+            project_id,
         ],
     )?;
 
-    Ok(SessionSummary {
+    let summary = SessionSummary {
         id: session.id.clone(),
+        project_id,
         cwd: session.cwd.clone(),
         harness: session.harness.clone(),
         model: session.model.clone(),
@@ -725,7 +774,107 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
         archived,
         pinned,
         linked_work_item: session.linked_work_item.clone(),
-    })
+    };
+    tx.commit()?;
+    Ok(summary)
+}
+
+fn ownership_error(message: String) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(message)))
+}
+
+fn validate_project_cwd(conn: &Connection, project_id: &str, cwd: &str) -> Result<(), String> {
+    validate_id(project_id, "project")?;
+    let project_cwd: Option<String> = conn
+        .query_row(
+            "SELECT cwd FROM agent_projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let project_cwd = project_cwd.ok_or("Project no longer exists")?;
+    if crate::agent_projects::normalize_cwd(cwd)?
+        != crate::agent_projects::normalize_cwd(&project_cwd)?
+    {
+        return Err("Session repository does not match project".into());
+    }
+    Ok(())
+}
+
+fn resolve_session_owner(
+    conn: &Connection,
+    session: &SessionUpsert,
+) -> Result<Option<String>, String> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM sessions WHERE id = ?1",
+            params![session.id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    let member: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM agent_project_members WHERE session_id = ?1",
+            params![session.id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let owner = stored.or(member.clone()).or(session.project_id.clone());
+    if let Some(owner) = &owner {
+        if session
+            .project_id
+            .as_ref()
+            .is_some_and(|requested| requested != owner)
+            || member.as_ref().is_some_and(|member| member != owner)
+        {
+            return Err(
+                "Session already belongs to another project; explicitly move it first".into(),
+            );
+        }
+        validate_project_cwd(conn, owner, &session.cwd)?;
+    }
+    Ok(owner)
+}
+
+fn assign_project(conn: &Connection, session_id: &str, project_id: &str) -> Result<(), String> {
+    validate_id(session_id, "session")?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let cwd: Option<String> = tx
+        .query_row(
+            "SELECT cwd FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    validate_project_cwd(&tx, project_id, &cwd.ok_or("Session no longer exists")?)?;
+    let previous: Option<String> = tx.query_row(
+        "SELECT project_id FROM agent_project_members WHERE session_id = ?1 AND project_id != ?2",
+        params![session_id, project_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(previous) = previous {
+        tx.execute(
+            "UPDATE agent_projects SET updated_at = MAX(updated_at + 1, ?1) WHERE id = ?2",
+            params![now_millis(), previous],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM agent_project_members WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.execute(
+        "UPDATE sessions SET project_id = ?1 WHERE id = ?2",
+        params![project_id, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 fn search_sessions(
@@ -975,24 +1124,56 @@ fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
 }
 
 fn list_by_project(conn: &Connection, cwd: &str) -> rusqlite::Result<Vec<SessionSummary>> {
+    list_project_sessions(conn, cwd, None)
+}
+
+fn list_by_agent_project(
+    conn: &Connection,
+    project_id: &str,
+) -> rusqlite::Result<Vec<SessionSummary>> {
+    let cwd: Option<String> = conn
+        .query_row(
+            "SELECT cwd FROM agent_projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match cwd {
+        Some(cwd) => list_project_sessions(conn, &cwd, Some(project_id)),
+        None => Ok(vec![]),
+    }
+}
+
+fn list_project_sessions(
+    conn: &Connection,
+    cwd: &str,
+    project_id: Option<&str>,
+) -> rusqlite::Result<Vec<SessionSummary>> {
     let git = crate::fs::git_info_for(&crate::fs::expand_home(cwd));
-    let mut statement = conn.prepare(
+    let scope = if project_id.is_some() {
+        "project_id"
+    } else {
+        "cwd"
+    };
+    let sql = format!(
         "SELECT id, cwd, harness, model, runtime_mode, title, provider_session_id,
                 created_at, updated_at, branch, archived, pinned,
-                linked_work_item_json
+                linked_work_item_json, project_id
          FROM sessions
-         WHERE cwd = ?1
+         WHERE {scope} = ?1
            AND has_user_message = 1
            AND id NOT IN (SELECT id FROM sessions WHERE inbox_ask IS NOT NULL)
-         ORDER BY updated_at DESC, id ASC",
-    )?;
-    let rows = statement.query_map(params![cwd], |row| {
+         ORDER BY updated_at DESC, id ASC"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map(params![project_id.unwrap_or(cwd)], |row| {
         let stored_branch: Option<String> = row.get(9)?;
         let archived: i64 = row.get(10)?;
         let pinned: i64 = row.get(11)?;
         let linked_work_item = optional_json(row.get(12)?);
         Ok(SessionSummary {
             id: row.get(0)?,
+            project_id: row.get(13)?,
             cwd: row.get(1)?,
             harness: row.get(2)?,
             model: row.get(3)?,
@@ -1017,7 +1198,7 @@ fn list_linked(conn: &Connection) -> rusqlite::Result<Vec<SessionSummary>> {
     let mut statement = conn.prepare(
         "SELECT id, cwd, harness, model, runtime_mode, title, provider_session_id,
                 created_at, updated_at, branch, archived, pinned,
-                linked_work_item_json
+                linked_work_item_json, project_id
          FROM sessions
          WHERE has_user_message = 1
            AND linked_work_item_json IS NOT NULL
@@ -1029,6 +1210,7 @@ fn list_linked(conn: &Connection) -> rusqlite::Result<Vec<SessionSummary>> {
         let pinned: i64 = row.get(11)?;
         Ok(SessionSummary {
             id: row.get(0)?,
+            project_id: row.get(13)?,
             cwd: row.get(1)?,
             harness: row.get(2)?,
             model: row.get(3)?,
@@ -1100,7 +1282,7 @@ fn get_session(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<S
         "SELECT id, cwd, harness, model, model_settings, runtime_mode, title,
                 provider_session_id, blocks_json, created_at, updated_at,
                 context_used, context_window, branch, worktree_cwd,
-                linked_work_item_json
+                linked_work_item_json, project_id
          FROM sessions
          WHERE id = ?1 AND inbox_ask IS NULL",
         params![session_id],
@@ -1123,6 +1305,7 @@ fn get_session(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<S
             })?;
             Ok(SessionRecord {
                 id: row.get(0)?,
+                project_id: row.get(16)?,
                 cwd: row.get(1)?,
                 harness: row.get(2)?,
                 model: row.get(3)?,
@@ -1239,6 +1422,7 @@ mod tests {
     fn sample(id: &str, cwd: &str, title: &str) -> SessionUpsert {
         SessionUpsert {
             id: id.into(),
+            project_id: None,
             cwd: cwd.into(),
             harness: "cursor".into(),
             model: "gpt-5".into(),
@@ -1380,6 +1564,31 @@ mod tests {
         assert!(second.updated_at > first.updated_at);
         assert_eq!(second.title, "Updated");
         assert_eq!(second.provider_session_id.as_deref(), Some("acp-session-2"));
+    }
+
+    #[test]
+    fn lists_sessions_by_agent_project_without_leaking_siblings() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let conn = store.lock_conn().unwrap();
+        conn.execute_batch(
+            "INSERT INTO agent_projects(id, cwd, data_json, created_at, updated_at)
+             VALUES ('alpha', '/tmp/a', '{}', 1, 1),
+                    ('beta', '/tmp/a', '{}', 1, 1);",
+        )
+        .unwrap();
+        let mut alpha = sample("a1", "/tmp/a", "Alpha");
+        alpha.project_id = Some("alpha".into());
+        let mut beta = sample("b1", "/tmp/a", "Beta");
+        beta.project_id = Some("beta".into());
+        upsert_session(&conn, &alpha).unwrap();
+        upsert_session(&conn, &beta).unwrap();
+        let rows = list_by_agent_project(&conn, "alpha").unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["a1"]
+        );
+        assert_eq!(rows[0].project_id.as_deref(), Some("alpha"));
+        assert_eq!(list_by_project(&conn, "/tmp/a").unwrap().len(), 2);
     }
 
     #[test]

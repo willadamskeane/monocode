@@ -12,6 +12,33 @@ import { projectName } from "./paths";
 import { sameProjectPath } from "./recents";
 import type { Session } from "./session";
 
+export function workspaceTabProjectId(
+  tab: WorkspaceTab,
+  sessions: readonly Pick<Session, "id" | "projectId">[],
+): string | undefined {
+  if (tab.projectId) return tab.projectId;
+  const ids = new Set(
+    sessions.filter((session) => leafIds(tab.layout).includes(session.id))
+      .map((session) => session.projectId).filter((id): id is string => !!id),
+  );
+  return ids.size === 1 ? [...ids][0] : undefined;
+}
+
+function tabMatchesProject(
+  tab: WorkspaceTab,
+  sessions: Session[],
+  path: string,
+  projectId?: string,
+): boolean {
+  const owner = workspaceTabProjectId(tab, sessions);
+  // Mixed legacy layouts must not become a path-based bridge between owners.
+  const hasOwnedSession = sessions.some((session) =>
+    session.projectId && leafIds(tab.layout).includes(session.id));
+  if (owner || projectId || hasOwnedSession) return !!owner && owner === projectId;
+  const cwd = workspaceTabCwd(tab, sessions);
+  return !!cwd && sameProjectPath(cwd, path);
+}
+
 export function workspaceTabCwd(
   tab: WorkspaceTab,
   sessions: readonly Pick<Session, "id" | "cwd">[],
@@ -51,22 +78,18 @@ export function findTabForProject(
   tabs: WorkspaceTab[],
   sessions: Session[],
   path: string,
+  projectId?: string,
 ): WorkspaceTab | undefined {
-  return tabs.find((tab) => {
-    const cwd = workspaceTabCwd(tab, sessions);
-    return cwd ? sameProjectPath(cwd, path) : false;
-  });
+  return tabs.find((tab) => tabMatchesProject(tab, sessions, path, projectId));
 }
 
 export function filterTabsForProject(
   tabs: WorkspaceTab[],
   sessions: Session[],
   path: string,
+  projectId?: string,
 ): WorkspaceTab[] {
-  return tabs.filter((tab) => {
-    const cwd = workspaceTabCwd(tab, sessions);
-    return cwd ? sameProjectPath(cwd, path) : false;
-  });
+  return tabs.filter((tab) => tabMatchesProject(tab, sessions, path, projectId));
 }
 
 export type WorkspaceTabCloseScope = "project" | "workspace";
@@ -98,20 +121,19 @@ export function planWorkspaceTabClose({
   }
 
   const closingCwd = workspaceTabCwd(tabs[closingIndex], sessions);
-  if (!closingCwd) {
+  const closingProjectId = workspaceTabProjectId(tabs[closingIndex], sessions);
+  if (!closingCwd && !closingProjectId) {
     return { action: "close", nextActiveTabId: globalTarget?.id };
   }
 
   for (let index = closingIndex - 1; index >= 0; index -= 1) {
-    const cwd = workspaceTabCwd(tabs[index], sessions);
-    if (cwd && sameProjectPath(cwd, closingCwd)) {
+    if (tabMatchesProject(tabs[index], sessions, closingCwd ?? "~", closingProjectId)) {
       return { action: "close", nextActiveTabId: tabs[index].id };
     }
   }
 
   for (let index = closingIndex + 1; index < tabs.length; index += 1) {
-    const cwd = workspaceTabCwd(tabs[index], sessions);
-    if (cwd && sameProjectPath(cwd, closingCwd)) {
+    if (tabMatchesProject(tabs[index], sessions, closingCwd ?? "~", closingProjectId)) {
       return { action: "close", nextActiveTabId: tabs[index].id };
     }
   }
@@ -154,6 +176,9 @@ export function applyPlaceSessionOnPane({
     leafIds(tab.layout).includes(targetId),
   );
   if (targetIndex < 0) return null;
+  const source = sessions.find((session) => session.id === sessionId);
+  const targetOwner = workspaceTabProjectId(tabs[targetIndex], sessions);
+  if ((source?.projectId || targetOwner) && source?.projectId !== targetOwner) return null;
 
   let nextSessions = replaceTarget
     ? sessions.filter((session) => session.id !== targetId)
@@ -191,9 +216,11 @@ export function applyPlaceSessionOnPane({
       continue;
     }
 
-    const replacement = createReplacement(
+    const created = createReplacement(
       nextSessions.find((session) => session.id === sessionId),
     );
+    const projectId = workspaceTabProjectId(tab, sessions);
+    const replacement = projectId ? { ...created, projectId } : created;
     nextSessions = [...nextSessions, replacement];
     nextTabs[tabIndex] = {
       ...tab,

@@ -84,7 +84,7 @@ let attemptedFor: unknown = null;
 
 /** Folder names carry no separator; every path key does, drive roots aside. */
 function looksLikeFolderNameKey(key: string): boolean {
-  return !key.includes("/") && key !== "~" && !/^[A-Za-z]:$/.test(key);
+  return !key.startsWith("project:") && !key.includes("/") && key !== "~" && !/^[A-Za-z]:$/.test(key);
 }
 
 /**

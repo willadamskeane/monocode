@@ -130,7 +130,7 @@ import { ColorPickerPopover, ColorSwatchRow } from "./ColorPickerPopover";
 import { ExplorerMenu, type ExplorerMenuItem } from "./ExplorerMenu";
 import { FileTree } from "./FileTree";
 import { HarnessIcon } from "./HarnessIcon";
-import { ProjectRail } from "./ProjectRail";
+import { ProjectRail, type AgentProjectNavigationProps } from "./ProjectRail";
 import { RailAction } from "./RailAction";
 import { TerminalSpinner } from "./TerminalSpinner";
 import { DevModeSlot, IconButton, TabVisitNav } from "./TitleBar";
@@ -172,7 +172,7 @@ function projectPathBusy(
   return false;
 }
 
-type Props = {
+type Props = AgentProjectNavigationProps & {
   cwd: string;
   /** Working copy for Changes / explorer git. Falls back to `cwd`. */
   gitCwd?: string;
@@ -207,6 +207,10 @@ type Props = {
   onCancelReminders?: (sessionIds: readonly string[]) => void;
   onDeleteSession?: (sessionId: string) => void;
   onDeleteSessions?: (sessionIds: readonly string[]) => void;
+  onAssignSessionsToProject?: (
+    sessionIds: readonly string[],
+    projectId: string,
+  ) => void;
   onOpenFile: (path: string) => void;
   onOpenTerminal?: (cwd: string) => void;
   onFileMoved?: (from: string, to: string) => void;
@@ -285,6 +289,7 @@ function SidebarComponent({
   onCancelReminders,
   onDeleteSession,
   onDeleteSessions,
+  onAssignSessionsToProject,
   onOpenFile,
   onOpenTerminal,
   onFileMoved,
@@ -319,6 +324,16 @@ function SidebarComponent({
   onOpenInbox,
   onOpenInboxItem,
   onOpenNotes,
+  agentProjects,
+  activeProjectId,
+  onSelectAgentProject,
+  onCreateAgentProject,
+  onProjectOverview,
+  onArchiveAgentProject,
+  onDeleteAgentProject,
+  onRenameAgentProject,
+  busyProjectIds,
+  approvalProjectIds,
   onGoToFile,
   searchActive = false,
   inboxActive = false,
@@ -762,6 +777,29 @@ function SidebarComponent({
           folder.sessionIds.includes(sessionId),
         ),
     })),
+    ...(onAssignSessionsToProject &&
+    (agentProjects?.filter((project) => !project.archived).length ?? 0) > 0
+      ? [
+          { kind: "sep" as const },
+          {
+            kind: "item" as const,
+            id: "add-to-project",
+            label: "Add to project",
+            submenu: (agentProjects ?? [])
+              .filter((project) => !project.archived)
+              .map((project) => ({
+                kind: "item" as const,
+                id: `project-add:${project.id}`,
+                label: project.name,
+                checked:
+                  menuSessions.length > 0 &&
+                  menuSessions.every(
+                    (session) => session.projectId === project.id,
+                  ),
+              })),
+          },
+        ]
+      : []),
     ...(canRemoveMenuSessionsFromFolders
       ? [
           {
@@ -843,6 +881,13 @@ function SidebarComponent({
     const archived = allMenuSessionsArchived;
     const pinned = allMenuSessionsPinned;
     closeSessionMenu();
+    if (id.startsWith("project-add:")) {
+      onAssignSessionsToProject?.(
+        sessionIds,
+        id.slice("project-add:".length),
+      );
+      return;
+    }
     if (id === "reminder:cancel") {
       onCancelReminders?.(sessionIds);
       return;
@@ -1193,6 +1238,13 @@ function SidebarComponent({
               onSearch={onSearch}
               onOpenInbox={onOpenInbox}
               onOpenNotes={notesEnabled ? onOpenNotes : undefined}
+              agentProjects={agentProjects}
+              activeProjectId={activeProjectId}
+              onSelectAgentProject={onSelectAgentProject}
+              onCreateAgentProject={onCreateAgentProject}
+              onProjectOverview={onProjectOverview}
+              busyProjectIds={busyProjectIds}
+              approvalProjectIds={approvalProjectIds}
               searchActive={searchActive}
               inboxActive={inboxActive}
               notesActive={notesActive}
@@ -1663,6 +1715,16 @@ function SidebarComponent({
           inboxActive={inboxActive}
           notesEnabled={notesEnabled}
           onOpenNotes={onOpenNotes}
+          agentProjects={agentProjects}
+          activeProjectId={activeProjectId}
+          onSelectAgentProject={onSelectAgentProject}
+          onCreateAgentProject={onCreateAgentProject}
+          onProjectOverview={onProjectOverview}
+          onArchiveAgentProject={onArchiveAgentProject}
+          onDeleteAgentProject={onDeleteAgentProject}
+          onRenameAgentProject={onRenameAgentProject}
+          busyProjectIds={busyProjectIds}
+          approvalProjectIds={approvalProjectIds}
           notesActive={notesActive}
           onTogglePanel={onToggleProjectRail}
           onSelectProject={onSelectProject}
@@ -1695,11 +1757,18 @@ function SidebarProjectPicker({
   onSearch,
   onOpenInbox,
   onOpenNotes,
+  agentProjects,
+  activeProjectId,
+  onSelectAgentProject,
+  onCreateAgentProject,
+  onProjectOverview,
+  busyProjectIds,
+  approvalProjectIds,
   searchActive = false,
   inboxActive = false,
   notesActive = false,
   inboxUnseen = false,
-}: {
+}: AgentProjectNavigationProps & {
   cwd: string;
   recents: RecentProject[];
   busy: boolean;
@@ -1724,20 +1793,24 @@ function SidebarProjectPicker({
   const [groupMascots] = useState(loadTabGroupMascots);
   const groupLogos = useTabGroupLogos();
   const seed = projectName(cwd);
-  const key = projectKey(cwd);
-  const label = resolveTabGroupLabel(key, groupLabels, basename(cwd) || seed);
+  const selectedProject = agentProjects?.find((project) => project.id === activeProjectId);
+  const key = selectedProject ? `project:${selectedProject.id}` : projectKey(cwd);
+  const label = selectedProject?.name ?? (agentProjects ? "Select project" : resolveTabGroupLabel(key, groupLabels, basename(cwd) || seed));
   const logoPath = resolveTabGroupLogo(key, groupLogos);
   const color = resolveTabGroupColor(key, groupColors, groupCustomColors, seed);
-  const projects = projectRailItems(recents, cwd);
+  const projects: (RecentProject & { id?: string; name?: string })[] = agentProjects
+    ? agentProjects.filter((project) => !project.archived).map((project) => ({ id: project.id, name: project.name, path: project.cwd, openedAt: project.updatedAt }))
+    : projectRailItems(recents, cwd);
+  const isCurrent = (item: (typeof projects)[number]) => item.id ? item.id === activeProjectId : sameProjectPath(item.path, cwd);
   const orderedProjects = [
-    ...projects.filter((item) => sameProjectPath(item.path, cwd)),
-    ...projects.filter((item) => !sameProjectPath(item.path, cwd)),
+    ...projects.filter(isCurrent),
+    ...projects.filter((item) => !isCurrent(item)),
   ];
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredProjects = normalizedQuery
     ? orderedProjects.filter((item) => {
         const itemKey = projectKey(item.path);
-        const itemLabel = resolveTabGroupLabel(
+        const itemLabel = item.name ?? resolveTabGroupLabel(
           itemKey,
           groupLabels,
           basename(item.path) || projectName(item.path),
@@ -1762,6 +1835,10 @@ function SidebarProjectPicker({
 
   const pickProject = (path: string) => {
     closePicker();
+    if (agentProjects) {
+      onSelectAgentProject?.(path);
+      return;
+    }
     if (!sameProjectPath(path, cwd)) onSelectProject(path);
   };
 
@@ -1782,7 +1859,7 @@ function SidebarProjectPicker({
       const project = filteredProjects[active];
       if (!project) return;
       event.preventDefault();
-      pickProject(project.path);
+      pickProject(project.id ?? project.path);
     }
   };
 
@@ -1827,7 +1904,7 @@ function SidebarProjectPicker({
               color={color}
               name={resolveTabGroupMascot(key, groupMascots)}
               className="size-3 shrink-0"
-              active={busy}
+              active={selectedProject ? !!busyProjectIds?.has(selectedProject.id) : busy}
             />
           )}
           <span className="min-w-0 truncate font-medium text-content/90">
@@ -1869,12 +1946,17 @@ function SidebarProjectPicker({
               />
             </label>
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-none p-1.5">
+              {selectedProject && onProjectOverview ? (
+                <button type="button" onClick={() => { closePicker(); onProjectOverview(); }} className="flex h-9 w-full items-center rounded-lg px-2.5 text-left text-[13px] text-content/75 hover:bg-content/8">
+                  Project overview
+                </button>
+              ) : null}
               {filteredProjects.length > 0 ? (
                 filteredProjects.map((item, index) => {
-                  const current = sameProjectPath(item.path, cwd);
-                  const itemKey = projectKey(item.path);
+                  const current = isCurrent(item);
+                  const itemKey = item.id ? `project:${item.id}` : projectKey(item.path);
                   const itemSeed = projectName(item.path);
-                  const itemLabel = resolveTabGroupLabel(
+                  const itemLabel = item.name ?? resolveTabGroupLabel(
                     itemKey,
                     groupLabels,
                     basename(item.path) || itemSeed,
@@ -1888,11 +1970,13 @@ function SidebarProjectPicker({
                   );
                   return (
                     <button
-                      key={item.path}
+                      key={item.id ?? item.path}
                       type="button"
+                      data-project-id={item.id}
+                      aria-current={current ? "true" : undefined}
                       title={item.path}
                       onMouseEnter={() => setActive(index)}
-                      onClick={() => pickProject(item.path)}
+                      onClick={() => pickProject(item.id ?? item.path)}
                       className={`flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left ${
                         active === index
                           ? "bg-content/10 text-content"
@@ -1914,6 +1998,7 @@ function SidebarProjectPicker({
                             color={itemColor}
                             name={resolveTabGroupMascot(itemKey, groupMascots)}
                             className="size-3.5"
+                            active={!!item.id && !!busyProjectIds?.has(item.id)}
                           />
                         )}
                       </span>
@@ -1921,8 +2006,9 @@ function SidebarProjectPicker({
                         {itemLabel}
                       </span>
                       <span className="max-w-44 shrink truncate font-mono text-[11px] text-content/40">
-                        {prettyParent(item.path)}
+                        {item.id ? item.path : prettyParent(item.path)}
                       </span>
+                      {item.id && approvalProjectIds?.has(item.id) ? <span aria-label="Needs approval" className="text-amber-400">!</span> : null}
                     </button>
                   );
                 })
@@ -1932,8 +2018,14 @@ function SidebarProjectPicker({
                 </p>
               )}
             </div>
-            {onOpenProject ? (
+            {onOpenProject || onCreateAgentProject ? (
               <div className="shrink-0 border-t border-content/10 p-1.5">
+                {onCreateAgentProject ? (
+                  <button type="button" onClick={() => { closePicker(); onCreateAgentProject(); }} className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-content/75 hover:bg-content/8">
+                    <Plus className="size-4" /> New project
+                  </button>
+                ) : null}
+                {onOpenProject ? (
                 <button
                   type="button"
                   onClick={() => {
@@ -1943,8 +2035,9 @@ function SidebarProjectPicker({
                   className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-content/75 hover:bg-content/8 hover:text-content"
                 >
                   <Plus className="size-4 shrink-0" strokeWidth={1.75} />
-                  <span>New project</span>
+                  <span>Open repository</span>
                 </button>
+                ) : null}
               </div>
             ) : null}
           </Popover>

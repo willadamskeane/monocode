@@ -74,6 +74,54 @@ import { Shimmer } from "../surfaces/Shimmer";
 import { TabGroupMenu, type TabGroupMenuExtraItem } from "./TabGroupMenu";
 import { TerminalSpinner } from "./TerminalSpinner";
 import type { SettingsSectionId } from "../lib/settings";
+import { isWorkspaceProject, type AgentProject } from "../lib/agentProjects";
+import {
+  loadProjectOrder,
+  saveProjectOrder,
+  loadPinnedProjectIds,
+  savePinnedProjectIds,
+} from "../lib/projectIdentity";
+
+export type AgentProjectNavigationProps = {
+  agentProjects?: AgentProject[];
+  activeProjectId?: string;
+  onSelectAgentProject?: (id: string) => void;
+  onCreateAgentProject?: () => void;
+  onProjectOverview?: () => void;
+  onArchiveAgentProject?: (id: string, archived: boolean) => void;
+  onDeleteAgentProject?: (id: string) => void;
+  onRenameAgentProject?: (id: string, name: string) => void;
+  busyProjectIds?: ReadonlySet<string>;
+  approvalProjectIds?: ReadonlySet<string>;
+};
+
+type ProjectItem = RecentProject & {
+  id?: string;
+  name?: string;
+  goal?: string;
+  workspace?: boolean;
+};
+const itemId = (item: ProjectItem) => item.id ?? item.path;
+
+function formatProjectAge(value: number, now: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const seconds = Math.max(0, Math.round((now - value) / 1000));
+  if (seconds < 60) return "now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d`;
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+    }).format(new Date(value));
+  } catch {
+    return "";
+  }
+}
 
 const REVEAL_LABEL = IS_MAC
   ? "Reveal in Finder"
@@ -105,7 +153,7 @@ function projectMenuExtraItems(
   return items;
 }
 
-type Props = {
+type Props = AgentProjectNavigationProps & {
   cwd: string;
   recents: RecentProject[];
   inboxUnseen?: boolean;
@@ -153,6 +201,16 @@ export function ProjectRail({
   inboxActive = false,
   notesEnabled = true,
   onOpenNotes,
+  agentProjects,
+  activeProjectId,
+  onSelectAgentProject,
+  onCreateAgentProject,
+  onProjectOverview,
+  onArchiveAgentProject,
+  onDeleteAgentProject,
+  onRenameAgentProject,
+  busyProjectIds,
+  approvalProjectIds,
   notesActive = false,
   onTogglePanel,
   onSelectProject,
@@ -180,6 +238,9 @@ export function ProjectRail({
   });
   const [railOrder, setRailOrder] = useState(loadProjectRailOrder);
   const [pinnedPaths, setPinnedPaths] = useState(loadPinnedProjects);
+  const [idOrder, setIdOrder] = useState(loadProjectOrder);
+  const [pinnedProjectIds, setPinnedProjectIds] = useState(loadPinnedProjectIds);
+  const [now, setNow] = useState(() => Date.now());
   const [groupLabels, setGroupLabels] = useState(loadTabGroupLabels);
   const [groupColors, setGroupColors] = useState(loadTabGroupColors);
   const [groupMascots, setGroupMascots] = useState(loadTabGroupMascots);
@@ -190,6 +251,8 @@ export function ProjectRail({
     x: number;
     y: number;
     path: string;
+    id?: string;
+    name?: string;
     projectKey: string;
   } | null>(null);
   const [removing, setRemoving] = useState<{
@@ -207,10 +270,43 @@ export function ProjectRail({
     () => collectRailProjects(recents, cwd),
     [cwd, recents],
   );
-  const sections = useMemo(
-    () => projectRailSections(recents, cwd, railOrder, pinnedPaths),
-    [cwd, pinnedPaths, railOrder, recents],
-  );
+  const sections = useMemo(() => {
+    if (!agentProjects) return projectRailSections(recents, cwd, railOrder, pinnedPaths);
+    const records = agentProjects.filter((project) => !project.archived);
+    const order = [...idOrder, ...records.map((project) => project.id).filter((id) => !idOrder.includes(id))];
+    const items: ProjectItem[] = order.flatMap((id) => {
+      const project = records.find((record) => record.id === id);
+      return project
+        ? [{
+            id,
+            name: project.name,
+            path: project.cwd,
+            openedAt: project.updatedAt,
+            goal: project.goal,
+            workspace: isWorkspaceProject(project),
+          }]
+        : [];
+    });
+    const pinned = new Set(pinnedProjectIds);
+    return {
+      pinned: items.filter((item) => pinned.has(item.id!)),
+      projects: items.filter((item) => !pinned.has(item.id!)),
+    };
+  }, [agentProjects, idOrder, pinnedProjectIds, cwd, pinnedPaths, railOrder, recents]);
+  const selectProject = (id: string) => agentProjects ? onSelectAgentProject?.(id) : onSelectProject(id);
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+  useEffect(() => {
+    if (!agentProjects) return;
+    setIdOrder((previous) => {
+      const next = [...previous.filter((id) => agentProjects.some((project) => project.id === id)), ...agentProjects.map((project) => project.id).filter((id) => !previous.includes(id))];
+      if (next.join("\0") === previous.join("\0")) return previous;
+      saveProjectOrder(next);
+      return next;
+    });
+  }, [agentProjects]);
   const busy = useMemo(() => {
     const set = new Set<string>();
     for (const path of busyPaths ?? []) set.add(path);
@@ -243,12 +339,16 @@ export function ProjectRail({
     return () => scrollParent.removeEventListener("scroll", onScroll, true);
   }, [projectMenu]);
 
-  const openProjectMenu = (path: string, x: number, y: number) => {
+  const openProjectMenu = (id: string, x: number, y: number) => {
+    const record = agentProjects?.find((project) => project.id === id);
+    const path = record?.cwd ?? id;
     setProjectMenu({
       x,
       y,
       path,
-      projectKey: projectKey(path),
+      id: record?.id,
+      name: record?.name,
+      projectKey: record ? `project:${record.id}` : projectKey(path),
     });
   };
 
@@ -262,6 +362,10 @@ export function ProjectRail({
   };
 
   const onProjectRename = (projectKey: string, label: string) => {
+    if (projectMenu?.id) {
+      if (label.trim()) onRenameAgentProject?.(projectMenu.id, label.trim());
+      return;
+    }
     saveTabGroupLabel(projectKey, label);
     setGroupLabels(loadTabGroupLabels());
   };
@@ -306,20 +410,38 @@ export function ProjectRail({
   };
 
   const onReorderPinned = (ids: string[]) => {
-    const subset = new Set(sections.pinned.map((item) => item.path));
-    const next = reorderSubset(railOrder, ids, subset);
+    const subset = new Set(sections.pinned.map(itemId));
+    const next = reorderSubset(agentProjects ? idOrder : railOrder, ids, subset);
+    if (agentProjects) {
+      setIdOrder(next);
+      saveProjectOrder(next);
+      return;
+    }
     setRailOrder(next);
     saveProjectRailOrder(next);
   };
 
   const onReorderProjects = (ids: string[]) => {
-    const subset = new Set(sections.projects.map((item) => item.path));
-    const next = reorderSubset(railOrder, ids, subset);
+    const subset = new Set(sections.projects.map(itemId));
+    const next = reorderSubset(agentProjects ? idOrder : railOrder, ids, subset);
+    if (agentProjects) {
+      setIdOrder(next);
+      saveProjectOrder(next);
+      return;
+    }
     setRailOrder(next);
     saveProjectRailOrder(next);
   };
 
   const onTogglePin = (path: string) => {
+    if (agentProjects) {
+      const next = pinnedProjectIds.includes(path)
+        ? pinnedProjectIds.filter((id) => id !== path)
+        : [...pinnedProjectIds, path];
+      setPinnedProjectIds(next);
+      savePinnedProjectIds(next);
+      return;
+    }
     const isPinned = pinnedPaths.some((pinned) =>
       sameProjectPath(pinned, path),
     );
@@ -332,17 +454,26 @@ export function ProjectRail({
 
   const onProjectMenuPick = (action: string) => {
     if (!projectMenu) return;
-    const { path, projectKey } = projectMenu;
-    if (action === "pin" || action === "unpin") onTogglePin(path);
+    const { path, projectKey, id, name } = projectMenu;
+    if (action === "pin" || action === "unpin") onTogglePin(id ?? path);
+    else if (action === "overview") {
+      if (id) onSelectAgentProject?.(id);
+      onProjectOverview?.();
+    }
     else if (action === "background") {
       setBackgroundProject({
         project: projectKey,
-        name: resolveTabGroupLabel(projectKey, groupLabels, basename(path)),
+        name: name ?? resolveTabGroupLabel(projectKey, groupLabels, basename(path)),
       });
     } else if (action === "reveal") void revealPath(path);
     else if (action === "archive") {
-      onRemoveProject?.(path, { purgeData: false });
+      if (id) onArchiveAgentProject?.(id, true);
+      else onRemoveProject?.(path, { purgeData: false });
     } else if (action === "delete") {
+      if (id) {
+        onDeleteAgentProject?.(id);
+        return;
+      }
       setRemoving({
         path,
         name: resolveTabGroupLabel(projectKey, groupLabels, basename(path)),
@@ -356,15 +487,15 @@ export function ProjectRail({
     setRemoving(null);
   };
 
-  const pinnedIds = sections.pinned.map((item) => item.path);
-  const projectIds = sections.projects.map((item) => item.path);
+  const pinnedIds = sections.pinned.map(itemId);
+  const projectIds = sections.projects.map(itemId);
   const pinnedSortable = useSortable(pinnedIds, onReorderPinned, {
     axis: "y",
-    onActivate: onSelectProject,
+    onActivate: selectProject,
   });
   const projectSortable = useSortable(projectIds, onReorderProjects, {
     axis: "y",
-    onActivate: onSelectProject,
+    onActivate: selectProject,
   });
   return (
     <nav
@@ -437,11 +568,18 @@ export function ProjectRail({
                 label="Pinned"
                 items={sections.pinned}
                 cwd={cwd}
+                activeProjectId={activeProjectId}
+                busyProjectIds={busyProjectIds}
+                approvalProjectIds={approvalProjectIds}
                 busy={busy}
                 sortable={pinnedSortable}
                 pinned
-                searchActive={searchActive || inboxActive || notesActive}
-                onSelect={onSelectProject}
+                searchActive={
+                  searchActive ||
+                  inboxActive ||
+                  notesActive
+                }
+                onSelect={selectProject}
                 onTogglePin={onTogglePin}
                 onContextMenu={onProjectContextMenu}
                 onOpenMenu={openProjectMenu}
@@ -450,6 +588,7 @@ export function ProjectRail({
                 groupCustomColors={groupCustomColors}
                 groupLogos={groupLogos}
                 groupMascots={groupMascots}
+                now={now}
               />
             ) : null}
 
@@ -457,13 +596,21 @@ export function ProjectRail({
               label="Projects"
               items={sections.projects}
               emptyLabel="No projects yet"
-              onAdd={onOpenProject}
+              onAdd={onCreateAgentProject ?? onOpenProject}
+              addLabel={agentProjects ? "New project" : "Open repository"}
               cwd={cwd}
+              activeProjectId={activeProjectId}
+              busyProjectIds={busyProjectIds}
+              approvalProjectIds={approvalProjectIds}
               busy={busy}
               sortable={projectSortable}
               pinned={false}
-              searchActive={searchActive || inboxActive || notesActive}
-              onSelect={onSelectProject}
+              searchActive={
+                searchActive ||
+                inboxActive ||
+                notesActive
+              }
+              onSelect={selectProject}
               onTogglePin={onTogglePin}
               onContextMenu={onProjectContextMenu}
               onOpenMenu={openProjectMenu}
@@ -472,6 +619,7 @@ export function ProjectRail({
               groupCustomColors={groupCustomColors}
               groupLogos={groupLogos}
               groupMascots={groupMascots}
+              now={now}
             />
           </div>
           <LiveAgentsPreview
@@ -504,7 +652,7 @@ export function ProjectRail({
           x={projectMenu.x}
           y={projectMenu.y}
           groupId={projectMenu.projectKey}
-          label={resolveTabGroupLabel(
+          label={projectMenu.name ?? resolveTabGroupLabel(
             projectMenu.projectKey,
             groupLabels,
             basename(projectMenu.path),
@@ -539,12 +687,14 @@ export function ProjectRail({
           onPick={() => {}}
           onClose={() => setProjectMenu(null)}
           showActions={false}
-          extraItems={projectMenuExtraItems(
-            pinnedPaths.some((pinned) =>
+          extraItems={[
+            ...(projectMenu.id && onProjectOverview ? [{ id: "overview", label: "Project overview", icon: FolderOpen }] : []),
+            ...projectMenuExtraItems(
+            projectMenu.id ? pinnedProjectIds.includes(projectMenu.id) : pinnedPaths.some((pinned) =>
               sameProjectPath(pinned, projectMenu.path),
             ),
-            Boolean(onRemoveProject),
-          )}
+            projectMenu.id ? Boolean(onArchiveAgentProject || onDeleteAgentProject) : Boolean(onRemoveProject),
+          )]}
           onExtraPick={onProjectMenuPick}
         />
       ) : null}
@@ -785,7 +935,11 @@ function ProjectSection({
   items,
   emptyLabel,
   onAdd,
+  addLabel = "Open project",
   cwd,
+  activeProjectId,
+  busyProjectIds,
+  approvalProjectIds,
   busy,
   sortable,
   pinned,
@@ -799,12 +953,17 @@ function ProjectSection({
   groupCustomColors,
   groupLogos,
   groupMascots,
+  now,
 }: {
   label: string;
-  items: RecentProject[];
+  items: ProjectItem[];
   emptyLabel?: string;
   onAdd?: () => void;
+  addLabel?: string;
   cwd: string;
+  activeProjectId?: string;
+  busyProjectIds?: ReadonlySet<string>;
+  approvalProjectIds?: ReadonlySet<string>;
   busy: Set<string>;
   sortable: SortableHandle;
   pinned: boolean;
@@ -818,6 +977,7 @@ function ProjectSection({
   groupCustomColors: Record<string, string>;
   groupLogos: ReturnType<typeof useTabGroupLogos>;
   groupMascots: Record<string, string>;
+  now: number;
 }) {
   return (
     <div className="shrink-0 mb-2">
@@ -828,8 +988,8 @@ function ProjectSection({
         {onAdd ? (
           <button
             type="button"
-            title="Open project"
-            aria-label="Open project"
+            title={addLabel}
+            aria-label={addLabel}
             onClick={onAdd}
             className="grid size-5 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/8 hover:text-content"
           >
@@ -845,10 +1005,11 @@ function ProjectSection({
       <div className="flex flex-col gap-px px-2">
         {items.map((item, index) => (
           <ProjectCard
-            key={item.path}
+            key={itemId(item)}
             item={item}
-            selected={!searchActive && sameProjectPath(item.path, cwd)}
-            busy={isBusyPath(item.path, busy)}
+            selected={!searchActive && (item.id ? item.id === activeProjectId : sameProjectPath(item.path, cwd))}
+            busy={item.id ? !!busyProjectIds?.has(item.id) : isBusyPath(item.path, busy)}
+            needsApproval={!!item.id && !!approvalProjectIds?.has(item.id)}
             pinned={pinned}
             sortable={sortable}
             index={index}
@@ -861,6 +1022,7 @@ function ProjectSection({
             groupCustomColors={groupCustomColors}
             groupLogos={groupLogos}
             groupMascots={groupMascots}
+            now={now}
           />
         ))}
       </div>
@@ -875,6 +1037,7 @@ function ProjectCard({
   item,
   selected,
   busy,
+  needsApproval,
   pinned,
   sortable,
   index,
@@ -887,10 +1050,12 @@ function ProjectCard({
   groupCustomColors,
   groupLogos,
   groupMascots,
+  now,
 }: {
-  item: RecentProject;
+  item: ProjectItem;
   selected: boolean;
   busy: boolean;
+  needsApproval: boolean;
   pinned: boolean;
   sortable: SortableHandle;
   index: number;
@@ -903,14 +1068,16 @@ function ProjectCard({
   groupCustomColors: Record<string, string>;
   groupLogos: ReturnType<typeof useTabGroupLogos>;
   groupMascots: Record<string, string>;
+  now: number;
 }) {
   const fallbackName = basename(item.path);
-  const key = projectKey(item.path);
+  const id = itemId(item);
+  const key = item.id ? `project:${item.id}` : projectKey(item.path);
   const seed = projectName(item.path);
-  const name = resolveTabGroupLabel(key, groupLabels, fallbackName);
+  const name = item.name ?? resolveTabGroupLabel(key, groupLabels, fallbackName);
   const logoPath = resolveTabGroupLogo(key, groupLogos);
   const color = resolveTabGroupColor(key, groupColors, groupCustomColors, seed);
-  const dragging = sortable.draggingId === item.path;
+  const dragging = sortable.draggingId === id;
   const showStart =
     sortable.draggingId &&
     sortable.toIndex === index &&
@@ -928,12 +1095,13 @@ function ProjectCard({
   const deletions = stats?.deletions ?? 0;
   const hasChanges = files > 0 || additions > 0 || deletions > 0;
   const cardTitle = projectCardTitle(item.path, name, stats, busy);
-  const cardAriaLabel = projectCardAriaLabel(name, stats, busy);
+  const cardAriaLabel = [projectCardAriaLabel(name, stats, busy), needsApproval ? "Needs approval" : ""].filter(Boolean).join(", ");
 
   return (
     <div
-      ref={(el) => sortable.setItemRef(item.path, el)}
-      className={`group relative flex touch-none items-stretch rounded-md px-2 h-8 ${
+      ref={(el) => sortable.setItemRef(id, el)}
+      data-project-id={item.id}
+      className={`group relative flex touch-none items-stretch rounded-md px-2 ${item.goal?.trim() ? "h-12" : "h-8"} ${
         selected
           ? "bg-content/12 text-content"
           : "opacity-65 hover:bg-content/5 hover:text-content"
@@ -943,16 +1111,16 @@ function ProjectCard({
         if ((event.target as HTMLElement | null)?.closest("[data-no-drag]")) {
           return;
         }
-        sortable.onItemPointerDown(item.path, event);
+        sortable.onItemPointerDown(id, event);
       }}
       onClick={(event) => {
         if ((event.target as HTMLElement | null)?.closest("[data-no-drag]")) {
           return;
         }
         if (sortable.consumeClick()) return;
-        onSelect(item.path);
+        onSelect(id);
       }}
-      onContextMenu={(event) => onContextMenu(item.path, event)}
+      onContextMenu={(event) => onContextMenu(id, event)}
     >
       {showStart ? (
         <div className="pointer-events-none absolute inset-x-2 top-0 z-20 h-0.5 rounded-full bg-accent" />
@@ -984,6 +1152,7 @@ function ProjectCard({
             />
           )}
         </div>
+        <span className="min-w-0 flex-1">
         {busy ? (
           <Shimmer as="span" duration={1.4} className={nameClassName}>
             {name}
@@ -991,7 +1160,18 @@ function ProjectCard({
         ) : (
           <span className={nameClassName}>{name}</span>
         )}
-        {hasChanges ? (
+        {item.goal?.trim() ? (
+          <span className="block truncate text-[10px] font-normal text-content/45">
+            {item.goal.trim()}
+          </span>
+        ) : null}
+        </span>
+        {needsApproval ? <CircleAlert aria-label="Needs approval" className="size-3.5 shrink-0 text-amber-400" /> : null}
+        {item.id ? (
+          <span className="shrink-0 text-[11px] tabular-nums text-content/40 group-hover:hidden">
+            {formatProjectAge(item.openedAt, now)}
+          </span>
+        ) : hasChanges ? (
           <span className="shrink-0 group-hover:hidden">
             <ProjectDiffStat additions={additions} deletions={deletions} />
           </span>
@@ -1006,7 +1186,7 @@ function ProjectCard({
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
-          onOpenMenu(item.path, event.clientX, event.clientY);
+          onOpenMenu(id, event.clientX, event.clientY);
         }}
         className="absolute right-1 top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid"
       >
@@ -1020,7 +1200,7 @@ function ProjectCard({
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
-          onTogglePin(item.path);
+          onTogglePin(id);
         }}
         className="absolute left-2 top-1/2 grid size-4 -translate-y-1/2 place-items-center rounded-sm text-content/55 opacity-0 pointer-events-none transition-opacity hover:text-content group-hover:pointer-events-auto group-hover:opacity-100"
       >
