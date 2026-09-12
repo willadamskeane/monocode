@@ -44,9 +44,10 @@ Small, focused pull requests are welcome. Anything large is worth an issue first
 
 ## Agent projects
 
-Open **Projects** in the sidebar to organize a long-running initiative within the current repository. This is inspired by [Cursor Projects](https://cursor.com/blog/projects), not an integration with Cursor's hosted Projects service.
+The existing **Projects** list in the sidebar is the switcher for persistent initiatives. Each entry has its own conversations, coordinator, context, and schedules. Its repository folder is a property, not its identity — multiple projects can share a checkout. This is inspired by [Cursor Projects](https://cursor.com/blog/projects), not an integration with Cursor's hosted Projects service.
 
-- Give the project a goal, then start or resume its coordinator. Delegate focused tasks to separate worker sessions; review the prepared message and choose a provider in the normal composer before sending.
+- Open a folder to create a default project for it, or choose **New project** to start another initiative in the same repository.
+- Give a project a goal, then start or resume its coordinator from the project overview. Delegate focused tasks to separate worker sessions; review the prepared message and choose a provider in the normal composer before sending.
 - Save shared instructions and context documents. Project members receive the latest saved context and bounded excerpts from other members' completed replies on each turn, including when switching providers. The coordinator can delegate through the selected provider's native subagent tools where supported.
 - Add opt-in, recurring **local subscriptions**. Each occurrence starts a fresh supervised worker using your default provider while MonoCode is open. Missed intervals are coalesced, not replayed. Workers may run in parallel in the same checkout, so review concurrent edits carefully. Errors appear in the workspace.
 - Archive a project to pause its subscriptions. Deleting an agent project removes its context and schedules, but keeps its conversations and repository files.

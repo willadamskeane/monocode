@@ -12,6 +12,7 @@ export function newAgentProjectSession(
     throw new Error("Describe the task before starting an agent.");
   return {
     ...newDefaultSession(project.cwd, "supervised"),
+    projectId: project.id,
     title: Array.from(title.trim() || project.name)
       .slice(0, 50)
       .join(""),

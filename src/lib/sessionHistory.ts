@@ -33,18 +33,29 @@ export function mergeHistorySummary(
   );
 }
 
+export function belongsToAgentProject(
+  entry: { projectId?: string; cwd: string },
+  cwd: string,
+  projectId?: string,
+): boolean {
+  if (projectId) return entry.projectId === projectId;
+  return sameProjectPath(entry.cwd, cwd);
+}
+
 /**
  * Swap in one project's freshly fetched rows while leaving every other
- * project's cached rows alone. `history` is keyed only by the `cwd` on each
- * row, so holding several projects at once costs nothing and lets a revisit
- * paint from cache instead of from an empty list.
+ * project's cached rows alone. Agent-project identity wins when present so
+ * two initiatives that share a folder stay distinct.
  */
 export function replaceProjectHistory(
   current: SessionSummary[],
   cwd: string,
   rows: SessionSummary[],
+  projectId?: string,
 ): SessionSummary[] {
-  const others = current.filter((entry) => !sameProjectPath(entry.cwd, cwd));
+  const others = current.filter(
+    (entry) => !belongsToAgentProject(entry, cwd, projectId),
+  );
   return [...others, ...rows];
 }
 
@@ -60,7 +71,11 @@ export function mergeProjectHistorySummary(
   const mine: SessionSummary[] = [];
   const others: SessionSummary[] = [];
   for (const entry of current) {
-    if (sameProjectPath(entry.cwd, summary.cwd)) mine.push(entry);
+    const same =
+      summary.projectId && entry.projectId
+        ? entry.projectId === summary.projectId
+        : sameProjectPath(entry.cwd, summary.cwd);
+    if (same) mine.push(entry);
     else if (entry.id !== summary.id) others.push(entry);
   }
   return [...others, ...mergeHistorySummary(mine, summary)];
@@ -95,6 +110,7 @@ export function summaryFromSession(
 ): SessionSummary {
   return {
     id: session.id,
+    ...(session.projectId ? { projectId: session.projectId } : {}),
     cwd: session.cwd,
     harness: session.harness,
     model: session.model,
@@ -137,13 +153,14 @@ export function historyWithLiveSessions(
   sessions: Session[],
   cwd: string,
   git?: SessionGitHint,
+  projectId?: string,
 ): SessionSummary[] {
   const inboxIds = new Set(sessions.filter(session => session.inboxAsk).map(session => session.id));
-  let rows = history.filter((entry) => !inboxIds.has(entry.id) && sameProjectPath(entry.cwd, cwd));
+  let rows = history.filter((entry) => !inboxIds.has(entry.id) && belongsToAgentProject(entry, cwd, projectId));
   const hint = projectGitHint(rows, gitOverlayForCwd(cwd, git));
   for (const session of sessions) {
     if (session.inboxAsk) continue;
-    if (!sameProjectPath(session.cwd, cwd)) continue;
+    if (!belongsToAgentProject(session, cwd, projectId)) continue;
     const live = session.busy || sessionNeedsInput(session);
     if (!shouldPersistSession(session) && !live) continue;
     if (rows.some((row) => row.id === session.id)) continue;

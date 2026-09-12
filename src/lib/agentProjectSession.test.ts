@@ -28,6 +28,7 @@ describe("project session creation", () => {
     );
     expect(session).toMatchObject({
       cwd: "/work/repo",
+      projectId: "project",
       runtimeMode: "supervised",
       title: "Coordinator",
       composerSeed: "Plan the migration",

@@ -207,6 +207,8 @@ import {
   resolveWorkspacePath,
 } from "./lib/paths";
 import {
+  archiveProject,
+  forgetProject,
   lastProjectPath,
   loadArchivedProjects,
   loadRecents,
@@ -221,7 +223,6 @@ import {
   planWorkspaceTabClose,
   workspaceTabCwd,
   focusedWorkspaceTabCwd,
-  workspaceTabProjectId,
 } from "./lib/workspaceTabGroups";
 import { runSessionRemoval } from "./lib/sessionRemoval";
 import {
@@ -258,6 +259,7 @@ import {
   getSession,
   listLinkedSessions,
   listSessionsByAgentProject,
+  listSessionsByProject,
   persistFingerprint,
   replaceInFlightSessions,
   saveWorkspaceSnapshot,
@@ -279,21 +281,26 @@ import {
 } from "./lib/harness/availability";
 import {
   applyAgentProjectContext,
+  createAgentProject,
   loadAgentProjects,
   saveAgentProject,
   migrateLegacyProjects,
   ensureDefaultAgentProject,
   deleteAgentProject,
+  subscribeAgentProjects,
   type AgentProject,
   type AgentProjectSubscription,
 } from "./lib/agentProjects";
 import {
   legacyProjectInputs,
   migrateLegacyProjectAppearance,
-  projectAppearanceKey,
-  loadProjectOrder,
 } from "./lib/projectIdentity";
-import { restoreProjectOwnership } from "./lib/appProjectState";
+import {
+  resolveActiveAgentProject,
+  restoreProjectOwnership,
+} from "./lib/appProjectState";
+import { removeProjectData } from "./lib/projectData";
+import { Modal } from "./chrome/Modal";
 import { ReminderNotices } from "./chrome/ReminderNotices";
 import { nextUnseenFinishedSessions } from "./lib/sessionDone";
 import {
@@ -593,7 +600,6 @@ export default function App({
   resumed = null,
   installedUpdate = null,
   history: bootHistory = [],
-  historyCwd: bootHistoryCwd = null,
 }: {
   windowTransfer?: WindowTransferPayload | null;
   resumed?: ResumedWorkspace | null;
@@ -619,10 +625,9 @@ export default function App({
   const [projectsReady, setProjectsReady] = useState(false);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
-  const overviewIdsRef = useRef(new Set<string>(
-    windowTransfer?.projectOverviewIds ?? resumed?.projectOverviewIds ?? [],
-  ));
-  const [overviewVersion, setOverviewVersion] = useState(0);
+  const [createProjectName, setCreateProjectName] = useState("");
+  const [createProjectGoal, setCreateProjectGoal] = useState("");
+  const [createProjectBusy, setCreateProjectBusy] = useState(false);
   const newSession = useCallback((...args: Parameters<typeof createSession>): Session => ({
     ...createSession(...args),
     projectId: activeProjectIdRef.current,
@@ -639,7 +644,7 @@ export default function App({
     docks: ProjectTerminal[], cwd: string, projectId = activeProjectIdRef.current,
   ) => findOwnedProjectTerminal(docks, cwd, projectId), []);
   const mapProjectTerminal = useCallback((
-    docks: ProjectTerminal[], cwd: string, update: (dock: ProjectTerminal) => ProjectTerminal,
+    docks: ProjectTerminal[], cwd: string, update: (dock: ProjectTerminal) => ProjectTerminal | null,
     projectId = activeProjectIdRef.current,
   ) => mapOwnedProjectTerminal(docks, cwd, update, projectId), []);
   const [recents, setRecents] = useState(() =>
@@ -777,6 +782,58 @@ export default function App({
   filePickerOpenRef.current = filePickerOpen;
   const whatsNewVersionRef = useRef(whatsNewVersion);
   whatsNewVersionRef.current = whatsNewVersion;
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const migrated = await migrateLegacyProjects(legacyProjectInputs());
+        migrateLegacyProjectAppearance(migrated);
+        const projects = await loadAgentProjects();
+        if (cancelled) return;
+        setAgentProjects(projects);
+        const cwd = projectCwdRef.current;
+        let active = resolveActiveAgentProject(
+          projects,
+          activeProjectIdRef.current,
+          cwd,
+        );
+        if (!active && looksLikeProject(cwd)) {
+          active = await ensureDefaultAgentProject(cwd, projectName(cwd));
+        }
+        if (cancelled) return;
+        if (active) {
+          activeProjectIdRef.current = active.id;
+          setActiveProjectId(active.id);
+          if (!sameProjectPath(projectCwdRef.current, active.cwd)) {
+            setProjectCwd(active.cwd);
+          }
+          setRecents(rememberProject(active.cwd));
+        }
+        setSessions((current) => restoreProjectOwnership(current, projects));
+        setProjectsError(null);
+      } catch (error: unknown) {
+        if (!cancelled) setProjectsError(String(error));
+      } finally {
+        if (!cancelled) setProjectsReady(true);
+      }
+    })();
+    const unsubscribe = subscribeAgentProjects(() => {
+      void loadAgentProjects()
+        .then((projects) => {
+          if (cancelled) return;
+          setAgentProjects(projects);
+          setSessions((current) => restoreProjectOwnership(current, projects));
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) setProjectsError(String(error));
+        });
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     if (!notesEnabled) setNotesViewOpen(false);
@@ -1000,13 +1057,14 @@ export default function App({
   sidebarCwdRef.current = sidebarCwd;
   const sidebarCwdKey =
     sidebarCwd && sidebarCwd !== "~" ? normalizeProjectPath(sidebarCwd) : null;
+  const historyKey = activeProjectId ?? sidebarCwdKey;
   const historyFailed =
-    sidebarCwdKey != null && historyErrorCwd === sidebarCwdKey;
+    historyKey != null && historyErrorCwd === historyKey;
   // True from the very first frame that shows a project we have never listed,
   // so the sidebar can stay blank instead of flashing "No sessions yet".
   const historyPending =
-    sidebarCwdKey != null &&
-    !loadedProjects.has(sidebarCwdKey) &&
+    historyKey != null &&
+    !loadedProjects.has(historyKey) &&
     !historyFailed;
   const gitCwd = active ? sessionWorkCwd(active) : sidebarCwd;
   const gitCwdRef = useRef(gitCwd);
@@ -1112,6 +1170,21 @@ export default function App({
         : [],
     [liveAgentsEnabled, sessions, unseenFinishedIds],
   );
+  const busyProjectIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const session of sessions) {
+      if (session.busy && session.projectId) ids.add(session.projectId);
+    }
+    return ids;
+  }, [sessions]);
+  const approvalProjectIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const session of sessions) {
+      if (approvalSessionIds.has(session.id) && session.projectId)
+        ids.add(session.projectId);
+    }
+    return ids;
+  }, [approvalSessionIds, sessions]);
 
   const hiddenApprovalToasts = useMemo(
     () => hiddenApprovalNotices(sessions, activeTabId, tabs, composerFocused),
@@ -1196,7 +1269,7 @@ export default function App({
     };
   }, [flushHarnessEvents, readProjectReturnMemory]);
 
-  const refreshHistory = useCallback(async (cwd: string) => {
+  const refreshHistory = useCallback(async (cwd: string, projectId?: string) => {
     if (!cwd || cwd === "~") return;
     // `history` holds every visited project's rows and the sidebar filters it
     // by cwd, so a project loaded once paints from cache on the way back and
@@ -1204,17 +1277,31 @@ export default function App({
     // first load is still pending is derived from `loadedProjects`, not
     // tracked here — a status set from this effect lands a render too late to
     // suppress the empty state.
-    const key = normalizeProjectPath(cwd);
+    const key = projectId ?? normalizeProjectPath(cwd);
     setHistoryErrorCwd((prev) => (prev === key ? null : prev));
     try {
-      const rows = await listSessionsByProject(cwd);
-      if (cwd !== sidebarCwdRef.current) return;
-      setHistory((current) => replaceProjectHistory(current, cwd, rows));
+      const rows = projectId
+        ? await listSessionsByAgentProject(projectId)
+        : await listSessionsByProject(cwd);
+      if (
+        projectId
+          ? projectId !== activeProjectIdRef.current
+          : cwd !== sidebarCwdRef.current
+      )
+        return;
+      setHistory((current) =>
+        replaceProjectHistory(current, cwd, rows, projectId),
+      );
       setLoadedProjects((prev) =>
         prev.has(key) ? prev : new Set(prev).add(key),
       );
     } catch {
-      if (cwd !== sidebarCwdRef.current) return;
+      if (
+        projectId
+          ? projectId !== activeProjectIdRef.current
+          : cwd !== sidebarCwdRef.current
+      )
+        return;
       // A failed revalidate keeps the cached cards rather than replacing a
       // good list with an error.
       if (!loadedProjectsRef.current.has(key)) setHistoryErrorCwd(key);
@@ -1222,8 +1309,8 @@ export default function App({
   }, []);
 
   useEffect(() => {
-    void refreshHistory(sidebarCwd);
-  }, [sidebarCwd, refreshHistory]);
+    void refreshHistory(sidebarCwd, activeProjectId);
+  }, [sidebarCwd, activeProjectId, refreshHistory]);
 
   useEffect(() => {
     if (!inboxViewOpen) return;
@@ -2382,8 +2469,8 @@ export default function App({
     // rather than trailing the last project's tabs.
     const active = tabs.find((tab) => tab.id === activeTabId);
     if (active && !workspaceTabCwd(active, sessions)) return [active];
-    return filterTabsForProject(tabs, sessions, projectCwd);
-  }, [activeTabId, tabs, sessions, projectCwd]);
+    return filterTabsForProject(tabs, sessions, projectCwd, activeProjectId);
+  }, [activeTabId, tabs, sessions, projectCwd, activeProjectId]);
 
   const onNext = useCallback(() => {
     const index = deckProjectTabs.findIndex((t) => t.id === activeTabId);
@@ -3264,20 +3351,36 @@ export default function App({
         !sameProjectPath(previous, normalized) &&
         !isBlankSession(current)
       ) {
-        setProjectCwd(normalized);
-        setRecents(rememberProject(normalized));
-        const session = newSession(
-          current.harness,
-          normalized,
-          current.model,
-          current.runtimeMode,
-          current.modelSettings,
-        );
-        const tab = newTab(session.id);
-        setSessions((prev) => [...prev, session]);
-        appendTab(tab, normalized);
-        setActiveTabId(tab.id);
-        setComposerFocused(true);
+        void ensureDefaultAgentProject(normalized, projectName(normalized))
+          .then((project) => {
+            activeProjectIdRef.current = project.id;
+            setActiveProjectId(project.id);
+            setAgentProjects((entries) =>
+              entries.some((entry) => entry.id === project.id)
+                ? entries
+                : [...entries, project],
+            );
+            setProjectCwd(normalized);
+            setRecents(rememberProject(normalized));
+            const session = newSession(
+              current.harness,
+              normalized,
+              current.model,
+              current.runtimeMode,
+              current.modelSettings,
+            );
+            const tab = newTab(session.id);
+            setSessions((prev) => [...prev, session]);
+            appendTab(tab, normalized);
+            setActiveTabId(tab.id);
+            setComposerFocused(true);
+          })
+          .catch((error: unknown) => {
+            void message(String(error), {
+              title: "Open project",
+              kind: "error",
+            });
+          });
         return;
       }
       if (
@@ -3295,6 +3398,7 @@ export default function App({
             ? {
                 ...s,
                 cwd: normalized,
+                projectId: activeProjectIdRef.current ?? s.projectId,
                 branch: undefined,
                 worktreeCwd: undefined,
               }
@@ -3345,14 +3449,16 @@ export default function App({
     [persistSession],
   );
 
-  const onSelectProject = useCallback(
-    (path: string) => {
+  const switchAgentProject = useCallback(
+    (project: AgentProject) => {
       setAgentProjectsViewOpen(false);
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
-      const normalized = normalizeProjectPath(path);
+      const normalized = normalizeProjectPath(project.cwd);
       if (!looksLikeProject(normalized)) return;
+      activeProjectIdRef.current = project.id;
+      setActiveProjectId(project.id);
 
       const activeWorkspace = tabsRef.current.find(
         (entry) => entry.id === activeTabIdRef.current,
@@ -3368,6 +3474,7 @@ export default function App({
         sessions: sessionsRef.current,
         activeTabId: activeTabIdRef.current,
         projectPath: normalized,
+        projectId: project.id,
       });
       switch (decision.action) {
         case "keep":
@@ -3407,6 +3514,158 @@ export default function App({
       setComposerFocused(true);
     },
     [activateTab, appendTab, onCwdChange, readProjectReturnMemory],
+  );
+
+  const onSelectAgentProject = useCallback(
+    (id: string) => {
+      const project = agentProjectsRef.current.find(
+        (entry) => entry.id === id && !entry.archived,
+      );
+      if (project) switchAgentProject(project);
+    },
+    [switchAgentProject],
+  );
+
+  const onCreateAgentProject = useCallback(() => {
+    const create = (cwd: string) => {
+      setCreateProjectName("");
+      setCreateProjectGoal("");
+      setCreateProjectBusy(false);
+      setCreateProjectOpen(true);
+      if (!sameProjectPath(projectCwdRef.current, cwd) && looksLikeProject(cwd)) {
+        setProjectCwd(cwd);
+      }
+    };
+    if (looksLikeProject(projectCwdRef.current)) {
+      create(projectCwdRef.current);
+      return;
+    }
+    void pickFolder().then((path) => {
+      if (path) create(normalizeProjectPath(path));
+    });
+  }, []);
+
+  const onSubmitCreateProject = useCallback(async () => {
+    const cwd = projectCwdRef.current;
+    const name = createProjectName.trim();
+    if (!looksLikeProject(cwd) || !name || createProjectBusy) return;
+    setCreateProjectBusy(true);
+    try {
+      const saved = await saveAgentProject(
+        createAgentProject(cwd, name, createProjectGoal.trim()),
+      );
+      setAgentProjects((current) => [
+        ...current.filter((entry) => entry.id !== saved.id),
+        saved,
+      ]);
+      setCreateProjectOpen(false);
+      switchAgentProject(saved);
+    } catch (error: unknown) {
+      void message(String(error), { title: "New project", kind: "error" });
+    } finally {
+      setCreateProjectBusy(false);
+    }
+  }, [createProjectBusy, createProjectGoal, createProjectName, switchAgentProject]);
+
+  const onArchiveAgentProject = useCallback(
+    (id: string, archived: boolean) => {
+      const project = agentProjectsRef.current.find((entry) => entry.id === id);
+      if (!project) return;
+      void saveAgentProject({ ...project, archived })
+        .then((saved) => {
+          setAgentProjects((current) =>
+            current.map((entry) => (entry.id === saved.id ? saved : entry)),
+          );
+          if (archived && activeProjectIdRef.current === id) {
+            const next = agentProjectsRef.current.find(
+              (entry) => entry.id !== id && !entry.archived,
+            );
+            if (next) switchAgentProject(next);
+            else {
+              activeProjectIdRef.current = undefined;
+              setActiveProjectId(undefined);
+              setProjectCwd("~");
+            }
+          }
+        })
+        .catch((error: unknown) => {
+          void message(String(error), { title: "Projects", kind: "error" });
+        });
+    },
+    [switchAgentProject],
+  );
+
+  const onDeleteAgentProject = useCallback(
+    (id: string) => {
+      const project = agentProjectsRef.current.find((entry) => entry.id === id);
+      if (!project) return;
+      void ask(
+        `Delete “${project.name}”? Shared context and schedules are removed. Existing chats are kept.`,
+        { title: "Delete project", kind: "warning" },
+      ).then((keep) => {
+        if (keep === false) return;
+        void deleteAgentProject(id, "keep")
+          .then(() => {
+            setAgentProjects((current) =>
+              current.filter((entry) => entry.id !== id),
+            );
+            if (activeProjectIdRef.current === id) {
+              const next = agentProjectsRef.current.find(
+                (entry) => entry.id !== id && !entry.archived,
+              );
+              if (next) switchAgentProject(next);
+              else {
+                activeProjectIdRef.current = undefined;
+                setActiveProjectId(undefined);
+                setProjectCwd("~");
+              }
+            }
+          })
+          .catch((error: unknown) => {
+            void message(String(error), { title: "Projects", kind: "error" });
+          });
+      });
+    },
+    [switchAgentProject],
+  );
+
+  const onRenameAgentProject = useCallback((id: string, name: string) => {
+    const project = agentProjectsRef.current.find((entry) => entry.id === id);
+    if (!project || !name.trim()) return;
+    void saveAgentProject({ ...project, name: name.trim() })
+      .then((saved) => {
+        setAgentProjects((current) =>
+          current.map((entry) => (entry.id === saved.id ? saved : entry)),
+        );
+      })
+      .catch((error: unknown) => {
+        void message(String(error), { title: "Projects", kind: "error" });
+      });
+  }, []);
+
+  const onSelectProject = useCallback(
+    (path: string) => {
+      const normalized = normalizeProjectPath(path);
+      if (!looksLikeProject(normalized)) return;
+      void ensureDefaultAgentProject(normalized, projectName(normalized))
+        .then((project) => {
+          setAgentProjects((current) =>
+            current.some((entry) => entry.id === project.id)
+              ? current.map((entry) =>
+                  entry.id === project.id ? project : entry,
+                )
+              : [...current, project],
+          );
+          switchAgentProject(project);
+        })
+        .catch((error: unknown) => {
+          void message(String(error), {
+            title: "Open project",
+            kind: "error",
+          });
+        });
+    },
+    [switchAgentProject],
   );
 
   const pickProject = useCallback(async () => {
@@ -3900,6 +4159,7 @@ export default function App({
                   preparedPrompt,
                   sessionId,
                   current.cwd,
+                  current.projectId ?? activeProjectIdRef.current,
                 );
             await steerHarnessTurn({
               harness: current.harness,
@@ -4169,6 +4429,7 @@ export default function App({
                 preparedPrompt,
                 sessionId,
                 current.cwd,
+                current.projectId ?? activeProjectIdRef.current,
               );
           const turnPrompt =
             intent === "plan" && !rawCommand ? planTurnPrompt(prompt) : prompt;
@@ -4364,6 +4625,8 @@ export default function App({
             { sessionId: session.id, role, title: session.title },
           ],
         });
+        activeProjectIdRef.current = latest.id;
+        setActiveProjectId(latest.id);
         const tab = newTab(session.id);
         sessionsRef.current = [...sessionsRef.current, session];
         setSessions(sessionsRef.current);
@@ -4975,15 +5238,21 @@ export default function App({
 
   const sidebarHistory = useMemo(
     () =>
-      historyWithLiveSessions(history, sessions, sidebarCwd, {
-        ...(projectBranches?.current
-          ? { branch: projectBranches.current }
-          : {}),
-        ...(sidebarCwd && sidebarCwd !== "~"
-          ? { repo: projectName(sidebarCwd) }
-          : {}),
-      }),
-    [history, projectBranches, sessions, sidebarCwd],
+      historyWithLiveSessions(
+        history,
+        sessions,
+        sidebarCwd,
+        {
+          ...(projectBranches?.current
+            ? { branch: projectBranches.current }
+            : {}),
+          ...(sidebarCwd && sidebarCwd !== "~"
+            ? { repo: projectName(sidebarCwd) }
+            : {}),
+        },
+        activeProjectId,
+      ),
+    [history, projectBranches, sessions, sidebarCwd, activeProjectId],
   );
   const inboxRelatedSessions = useMemo(() => {
     const byId = new Map<string, SessionSummary>();
@@ -5278,15 +5547,24 @@ export default function App({
 
   const onNavigateProjectList = useCallback(
     (delta: number) => {
-      const current = normalizeProjectPath(projectCwdRef.current);
-      const ids = projectRailItems(loadRecents(), current).map(
-        (project) => project.path,
+      const records = agentProjectsRef.current.filter(
+        (project) => !project.archived,
       );
+      if (records.length > 0) {
+        const current = activeProjectIdRef.current ?? records[0]?.id;
+        const ids = records.map((project) => project.id);
+        const next = adjacentItemId(ids, current, delta);
+        if (!next || next === current) return;
+        onSelectAgentProject(next);
+        return;
+      }
+      const current = normalizeProjectPath(projectCwdRef.current);
+      const ids = loadRecents().map((project) => project.path);
       const next = adjacentItemId(ids, current, delta);
       if (!next || sameProjectPath(next, current)) return;
       onSelectProject(next);
     },
-    [onSelectProject],
+    [onSelectAgentProject, onSelectProject],
   );
 
   const actions = useRef({
@@ -5743,6 +6021,16 @@ export default function App({
         onSelectProject={onSelectProject}
         onOpenProject={pickProject}
         onRemoveProject={onRemoveProject}
+        agentProjects={projectsReady ? agentProjects : undefined}
+        activeProjectId={activeProjectId}
+        onSelectAgentProject={onSelectAgentProject}
+        onCreateAgentProject={onCreateAgentProject}
+        onProjectOverview={onOpenAgentProjects}
+        onArchiveAgentProject={onArchiveAgentProject}
+        onDeleteAgentProject={onDeleteAgentProject}
+        onRenameAgentProject={onRenameAgentProject}
+        busyProjectIds={busyProjectIds}
+        approvalProjectIds={approvalProjectIds}
         onNew={onNew}
         openSessions={openProjectSessions}
         onNewTerminal={onNewTerminal}
@@ -5750,8 +6038,6 @@ export default function App({
         onOpenInbox={onOpenInbox}
         onOpenInboxItem={onOpenLinkedWorkItem}
         onOpenNotes={notesEnabled ? onOpenNotes : undefined}
-        onOpenAgentProjects={onOpenAgentProjects}
-        agentProjectsActive={agentProjectsViewOpen}
         onGoToFile={onGoToFile}
         searchActive={searchViewOpen}
         inboxActive={inboxViewOpen}
@@ -5771,6 +6057,21 @@ export default function App({
       />
 
       <div className="body-glass flex min-h-0 min-w-0 flex-1 flex-col">
+        {projectsError ? (
+          <div
+            role="alert"
+            className="flex items-center gap-3 border-b border-content/10 bg-background-base px-4 py-2 text-xs text-content/70"
+          >
+            <span className="min-w-0 flex-1">{projectsError}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded px-2 py-1 hover:bg-content/8"
+              onClick={() => setProjectsError(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         {projectSubscriptions.error ? (
           <div
             role="alert"
@@ -6026,6 +6327,7 @@ export default function App({
         {agentProjectsViewOpen ? (
           <AgentProjectsView
             cwd={projectCwd}
+            activeProjectId={activeProjectId}
             besideRail={projectRailOpen}
             onClose={() => setAgentProjectsViewOpen(false)}
             onToggleSidebar={onToggleSidebar}
@@ -6093,6 +6395,68 @@ export default function App({
           />
         )}
       </div>
+
+      {createProjectOpen ? (
+        <Modal
+          title="New project"
+          description="A persistent initiative in this repository. The folder is a property, not the identity."
+          size="sm"
+          onClose={() => {
+            if (!createProjectBusy) setCreateProjectOpen(false);
+          }}
+        >
+          <form
+            className="flex flex-col gap-3 p-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void onSubmitCreateProject();
+            }}
+          >
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-content/65">
+              Name
+              <input
+                required
+                autoFocus
+                maxLength={160}
+                value={createProjectName}
+                disabled={createProjectBusy}
+                onChange={(event) => setCreateProjectName(event.target.value)}
+                className="rounded-lg border border-content/15 bg-background-base px-3 py-2 text-sm text-content"
+                placeholder="Launch the next release"
+              />
+            </label>
+            <label className="flex flex-col gap-1.5 text-xs font-medium text-content/65">
+              Goal
+              <textarea
+                value={createProjectGoal}
+                disabled={createProjectBusy}
+                onChange={(event) => setCreateProjectGoal(event.target.value)}
+                className="min-h-24 rounded-lg border border-content/15 bg-background-base px-3 py-2 text-sm text-content"
+                placeholder="What outcome are you working toward? (optional)"
+              />
+            </label>
+            <p className="truncate font-mono text-[11px] text-content/40">
+              {projectCwd}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-lg border border-content/10 px-3 py-2 text-sm text-content/75 hover:bg-content/8"
+                disabled={createProjectBusy}
+                onClick={() => setCreateProjectOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-lg border border-accent/20 bg-accent/15 px-3 py-2 text-sm text-accent hover:bg-accent/25 disabled:opacity-40"
+                disabled={createProjectBusy || !createProjectName.trim()}
+              >
+                {createProjectBusy ? "Creating…" : "Create project"}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      ) : null}
 
       {filePickerOpen ? (
         <FilePicker

@@ -188,29 +188,29 @@ pub fn session_list_by_project(
     if cwd.trim().is_empty() {
         return Err("cwd is required".into());
     }
-
-    #[tauri::command(async)]
-    pub fn session_list_by_agent_project(
-        store: State<'_, SessionStore>,
-        project_id: String,
-    ) -> Result<Vec<SessionSummary>, String> {
-        validate_id(&project_id, "project")?;
-        list_by_agent_project(&*store.lock_conn()?, &project_id).map_err(|e| e.to_string())
-    }
-
-    #[tauri::command(async)]
-    pub fn session_assign_project(
-        app: AppHandle,
-        store: State<'_, SessionStore>,
-        session_id: String,
-        project_id: String,
-    ) -> Result<(), String> {
-        assign_project(&*store.lock_conn()?, &session_id, &project_id)?;
-        let _ = app.emit("agent-projects-changed", ());
-        Ok(())
-    }
     let conn = store.conn.lock().map_err(|_| "Session store is locked")?;
     list_by_project(&conn, &cwd).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+pub fn session_list_by_agent_project(
+    store: State<'_, SessionStore>,
+    project_id: String,
+) -> Result<Vec<SessionSummary>, String> {
+    validate_id(&project_id, "project")?;
+    list_by_agent_project(&*store.lock_conn()?, &project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+pub fn session_assign_project(
+    app: AppHandle,
+    store: State<'_, SessionStore>,
+    session_id: String,
+    project_id: String,
+) -> Result<(), String> {
+    assign_project(&*store.lock_conn()?, &session_id, &project_id)?;
+    let _ = app.emit("agent-projects-changed", ());
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -650,10 +650,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Result<SessionSummary> {
-    let tx = rusqlite::Transaction::new_unchecked(
-        conn,
-        rusqlite::TransactionBehavior::Immediate,
-    )?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let conn = &*tx;
     let project_id = resolve_session_owner(conn, session).map_err(ownership_error)?;
     let now = now_millis();
@@ -788,10 +785,14 @@ fn ownership_error(message: String) -> rusqlite::Error {
 
 fn validate_project_cwd(conn: &Connection, project_id: &str, cwd: &str) -> Result<(), String> {
     validate_id(project_id, "project")?;
-    let project_cwd: Option<String> = conn.query_row(
-        "SELECT cwd FROM agent_projects WHERE id = ?1",
-        params![project_id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let project_cwd: Option<String> = conn
+        .query_row(
+            "SELECT cwd FROM agent_projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
     let project_cwd = project_cwd.ok_or("Project no longer exists")?;
     if crate::agent_projects::normalize_cwd(cwd)?
         != crate::agent_projects::normalize_cwd(&project_cwd)?
@@ -805,20 +806,34 @@ fn resolve_session_owner(
     conn: &Connection,
     session: &SessionUpsert,
 ) -> Result<Option<String>, String> {
-    let stored: Option<String> = conn.query_row(
-        "SELECT project_id FROM sessions WHERE id = ?1", params![session.id],
-        |row| row.get::<_, Option<String>>(0),
-    ).optional().map_err(|e| e.to_string())?.flatten();
-    let member: Option<String> = conn.query_row(
-        "SELECT project_id FROM agent_project_members WHERE session_id = ?1",
-        params![session.id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM sessions WHERE id = ?1",
+            params![session.id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    let member: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM agent_project_members WHERE session_id = ?1",
+            params![session.id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
     let owner = stored.or(member.clone()).or(session.project_id.clone());
     if let Some(owner) = &owner {
-        if session.project_id.as_ref().is_some_and(|requested| requested != owner)
+        if session
+            .project_id
+            .as_ref()
+            .is_some_and(|requested| requested != owner)
             || member.as_ref().is_some_and(|member| member != owner)
         {
-            return Err("Session already belongs to another project; explicitly move it first".into());
+            return Err(
+                "Session already belongs to another project; explicitly move it first".into(),
+            );
         }
         validate_project_cwd(conn, owner, &session.cwd)?;
     }
@@ -829,8 +844,14 @@ fn assign_project(conn: &Connection, session_id: &str, project_id: &str) -> Resu
     validate_id(session_id, "session")?;
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    let cwd: Option<String> = tx.query_row("SELECT cwd FROM sessions WHERE id = ?1",
-        params![session_id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+    let cwd: Option<String> = tx
+        .query_row(
+            "SELECT cwd FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
     validate_project_cwd(&tx, project_id, &cwd.ok_or("Session no longer exists")?)?;
     let previous: Option<String> = tx.query_row(
         "SELECT project_id FROM agent_project_members WHERE session_id = ?1 AND project_id != ?2",
@@ -840,12 +861,19 @@ fn assign_project(conn: &Connection, session_id: &str, project_id: &str) -> Resu
         tx.execute(
             "UPDATE agent_projects SET updated_at = MAX(updated_at + 1, ?1) WHERE id = ?2",
             params![now_millis(), previous],
-        ).map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM agent_project_members WHERE session_id = ?1",
-            params![session_id]).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM agent_project_members WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|e| e.to_string())?;
     }
-    tx.execute("UPDATE sessions SET project_id = ?1 WHERE id = ?2",
-        params![project_id, session_id]).map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE sessions SET project_id = ?1 WHERE id = ?2",
+        params![project_id, session_id],
+    )
+    .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -1099,9 +1127,17 @@ fn list_by_project(conn: &Connection, cwd: &str) -> rusqlite::Result<Vec<Session
     list_project_sessions(conn, cwd, None)
 }
 
-fn list_by_agent_project(conn: &Connection, project_id: &str) -> rusqlite::Result<Vec<SessionSummary>> {
-    let cwd: Option<String> = conn.query_row("SELECT cwd FROM agent_projects WHERE id = ?1",
-        params![project_id], |row| row.get(0)).optional()?;
+fn list_by_agent_project(
+    conn: &Connection,
+    project_id: &str,
+) -> rusqlite::Result<Vec<SessionSummary>> {
+    let cwd: Option<String> = conn
+        .query_row(
+            "SELECT cwd FROM agent_projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
     match cwd {
         Some(cwd) => list_project_sessions(conn, &cwd, Some(project_id)),
         None => Ok(vec![]),
@@ -1114,7 +1150,11 @@ fn list_project_sessions(
     project_id: Option<&str>,
 ) -> rusqlite::Result<Vec<SessionSummary>> {
     let git = crate::fs::git_info_for(&crate::fs::expand_home(cwd));
-    let scope = if project_id.is_some() { "project_id" } else { "cwd" };
+    let scope = if project_id.is_some() {
+        "project_id"
+    } else {
+        "cwd"
+    };
     let sql = format!(
         "SELECT id, cwd, harness, model, runtime_mode, title, provider_session_id,
                 created_at, updated_at, branch, archived, pinned,
@@ -1123,8 +1163,8 @@ fn list_project_sessions(
          WHERE {scope} = ?1
            AND has_user_message = 1
            AND id NOT IN (SELECT id FROM sessions WHERE inbox_ask IS NOT NULL)
-         ORDER BY updated_at DESC, id ASC",
-    )?;
+         ORDER BY updated_at DESC, id ASC"
+    );
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params![project_id.unwrap_or(cwd)], |row| {
         let stored_branch: Option<String> = row.get(9)?;
@@ -1524,6 +1564,31 @@ mod tests {
         assert!(second.updated_at > first.updated_at);
         assert_eq!(second.title, "Updated");
         assert_eq!(second.provider_session_id.as_deref(), Some("acp-session-2"));
+    }
+
+    #[test]
+    fn lists_sessions_by_agent_project_without_leaking_siblings() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let conn = store.lock_conn().unwrap();
+        conn.execute_batch(
+            "INSERT INTO agent_projects(id, cwd, data_json, created_at, updated_at)
+             VALUES ('alpha', '/tmp/a', '{}', 1, 1),
+                    ('beta', '/tmp/a', '{}', 1, 1);",
+        )
+        .unwrap();
+        let mut alpha = sample("a1", "/tmp/a", "Alpha");
+        alpha.project_id = Some("alpha".into());
+        let mut beta = sample("b1", "/tmp/a", "Beta");
+        beta.project_id = Some("beta".into());
+        upsert_session(&conn, &alpha).unwrap();
+        upsert_session(&conn, &beta).unwrap();
+        let rows = list_by_agent_project(&conn, "alpha").unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["a1"]
+        );
+        assert_eq!(rows[0].project_id.as_deref(), Some("alpha"));
+        assert_eq!(list_by_project(&conn, "/tmp/a").unwrap().len(), 2);
     }
 
     #[test]

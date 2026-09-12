@@ -4,7 +4,6 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentProject } from "../lib/agentProjects";
 import { AgentProjectsView } from "./AgentProjectsView";
-import { Sidebar } from "../chrome/Sidebar";
 
 const api = vi.hoisted(() => ({
   load: vi.fn(),
@@ -203,45 +202,20 @@ describe("Projects workspace", () => {
     await click("Save changes");
     expect(records[0].instructions).toBe("Recover these instructions");
   });
-  it.each([true, false])(
-    "exposes Projects with the repository rail open=%s and hides absent callbacks",
-    async (projectRailOpen) => {
-      const onOpenAgentProjects = vi.fn();
-      const sidebar: ComponentProps<typeof Sidebar> = {
-        cwd: props.cwd,
-        open: true,
-        projectRailOpen,
-        sessions: [],
-        busySessionIds: new Set(),
-        approvalSessionIds: new Set(),
-        status: "idle",
-        pending: false,
-        tab: "sessions",
-        filesSearchOpen: false,
-        onSelectSession: vi.fn(),
-        onOpenFile: vi.fn(),
-        onTabChange: vi.fn(),
-        onFilesSearchOpenChange: vi.fn(),
-        onSelectProject: vi.fn(),
-        onOpenProject: vi.fn(),
-        onOpenAgentProjects,
-      };
-      await act(async () => root.render(createElement(Sidebar, sidebar)));
-      await click("Projects");
-      expect(onOpenAgentProjects).toHaveBeenCalledOnce();
-      await act(async () =>
-        root.render(
-          createElement(Sidebar, {
-            ...sidebar,
-            onOpenAgentProjects: undefined,
-          }),
-        ),
-      );
-      expect(
-        container.querySelector('button[aria-label="Projects"]'),
-      ).toBeNull();
-    },
-  );
+  it("hides the inner project list when the rail already owns switching", async () => {
+    await act(async () =>
+      root.render(
+        createElement(AgentProjectsView, {
+          ...props,
+          activeProjectId: "project-1",
+        }),
+      ),
+    );
+    const list = container.querySelector('[aria-label="Project list"]');
+    expect(list?.className).toContain("hidden");
+    expect(container.textContent).toContain("Release readiness");
+    expect(container.textContent).not.toContain("← All projects");
+  });
 
   it("loads only the current folder and creates a named initiative with a goal", async () => {
     records = [];

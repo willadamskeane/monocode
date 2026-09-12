@@ -250,11 +250,14 @@ export function ProjectRail({
     const order = [...idOrder, ...records.map((project) => project.id).filter((id) => !idOrder.includes(id))];
     const items: ProjectItem[] = order.flatMap((id) => {
       const project = records.find((record) => record.id === id);
-      return project ? [{ id, name: project.name, path: project.cwd, lastOpened: project.updatedAt }] : [];
+      return project
+        ? [{ id, name: project.name, path: project.cwd, openedAt: project.updatedAt }]
+        : [];
     });
+    const pinned = new Set(pinnedProjectIds);
     return {
-      pinned: items.filter((item) => pinnedProjectIds.has(item.id!)),
-      projects: items.filter((item) => !pinnedProjectIds.has(item.id!)),
+      pinned: items.filter((item) => pinned.has(item.id!)),
+      projects: items.filter((item) => !pinned.has(item.id!)),
     };
   }, [agentProjects, idOrder, pinnedProjectIds, cwd, pinnedPaths, railOrder, recents]);
   const selectProject = (id: string) => agentProjects ? onSelectAgentProject?.(id) : onSelectProject(id);
@@ -395,9 +398,9 @@ export function ProjectRail({
 
   const onTogglePin = (path: string) => {
     if (agentProjects) {
-      const next = new Set(pinnedProjectIds);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
+      const next = pinnedProjectIds.includes(path)
+        ? pinnedProjectIds.filter((id) => id !== path)
+        : [...pinnedProjectIds, path];
       setPinnedProjectIds(next);
       savePinnedProjectIds(next);
       return;
@@ -648,7 +651,7 @@ export function ProjectRail({
           extraItems={[
             ...(projectMenu.id && onProjectOverview ? [{ id: "overview", label: "Project overview", icon: FolderOpen }] : []),
             ...projectMenuExtraItems(
-            projectMenu.id ? pinnedProjectIds.has(projectMenu.id) : pinnedPaths.some((pinned) =>
+            projectMenu.id ? pinnedProjectIds.includes(projectMenu.id) : pinnedPaths.some((pinned) =>
               sameProjectPath(pinned, projectMenu.path),
             ),
             projectMenu.id ? Boolean(onArchiveAgentProject || onDeleteAgentProject) : Boolean(onRemoveProject),

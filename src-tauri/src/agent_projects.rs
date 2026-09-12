@@ -361,7 +361,9 @@ fn save_project(conn: &mut Connection, mut project: AgentProject) -> Result<Agen
                 return Err("Session repository does not match project".into());
             }
             if owner.as_deref().is_some_and(|owner| owner != project.id) {
-                return Err("Session already belongs to another project; explicitly move it first".into());
+                return Err(
+                    "Session already belongs to another project; explicitly move it first".into(),
+                );
             }
             tx.execute(
                 "UPDATE sessions SET project_id = ?1 WHERE id = ?2",
@@ -379,36 +381,43 @@ fn save_project(conn: &mut Connection, mut project: AgentProject) -> Result<Agen
     Ok(project)
 }
 
-fn delete_project(
-    conn: &Connection,
-    project_id: &str,
-    disposition: &str,
-) -> Result<(), String> {
+fn delete_project(conn: &Connection, project_id: &str, disposition: &str) -> Result<(), String> {
     id(project_id)?;
     if !matches!(disposition, "keep" | "delete") {
         return Err("Invalid chat disposition".into());
     }
     let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    let cwd: Option<String> = tx.query_row(
-        "SELECT cwd FROM agent_projects WHERE id = ?1",
-        params![project_id], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
+    let cwd: Option<String> = tx
+        .query_row(
+            "SELECT cwd FROM agent_projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
     let Some(cwd) = cwd else { return Ok(()) };
     if disposition == "delete" {
-        tx.execute("DELETE FROM sessions WHERE project_id = ?1", params![project_id])
-            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM sessions WHERE project_id = ?1",
+            params![project_id],
+        )
+        .map_err(|e| e.to_string())?;
     } else {
-        let owned: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE project_id = ?1",
-            params![project_id], |row| row.get(0),
-        ).map_err(|e| e.to_string())?;
+        let owned: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE project_id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
         if owned > 0 {
             let target = default_destination(&tx, &cwd, project_id)?;
             tx.execute(
                 "UPDATE sessions SET project_id = ?1 WHERE project_id = ?2",
                 params![target.id, project_id],
-            ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
     tx.execute(
@@ -435,14 +444,22 @@ fn create_default(
     name: Option<&str>,
     archived: bool,
 ) -> Result<AgentProject, String> {
-    let id: String = conn.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))
+    let id: String = conn
+        .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
     let mut project = AgentProject {
         id,
         cwd: cwd.into(),
-        name: name.filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| cwd.rsplit('/').find(|part| !part.is_empty()).unwrap_or("Project"))
-            .chars().take(50).collect(),
+        name: name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| {
+                cwd.rsplit('/')
+                    .find(|part| !part.is_empty())
+                    .unwrap_or("Project")
+            })
+            .chars()
+            .take(50)
+            .collect(),
         goal: String::new(),
         instructions: String::new(),
         documents: vec![],
@@ -465,11 +482,16 @@ fn ensure_default(
     archived: bool,
 ) -> Result<AgentProject, String> {
     let cwd = normalize_cwd(cwd)?;
-    let mapped: Option<String> = conn.query_row(
-        "SELECT project_id FROM agent_project_defaults WHERE cwd = ?1",
-        params![cwd], |row| row.get(0),
-    ).optional().map_err(|e| e.to_string())?;
-    if let Some(project) = list_projects(conn, Some(&cwd))?.into_iter()
+    let mapped: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM agent_project_defaults WHERE cwd = ?1",
+            params![cwd],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(project) = list_projects(conn, Some(&cwd))?
+        .into_iter()
         .find(|project| Some(&project.id) == mapped.as_ref())
     {
         return Ok(project);
@@ -479,7 +501,8 @@ fn ensure_default(
         "INSERT INTO agent_project_defaults(cwd, project_id) VALUES (?1, ?2)
          ON CONFLICT(cwd) DO UPDATE SET project_id = excluded.project_id",
         params![cwd, project.id],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     project.legacy_default = true;
     Ok(project)
 }
@@ -489,13 +512,18 @@ fn default_destination(
     cwd: &str,
     deleting: &str,
 ) -> Result<AgentProject, String> {
-    let mapped: Option<(String, Option<String>)> = conn.query_row(
-        "SELECT project_id, retained_project_id FROM agent_project_defaults WHERE cwd = ?1",
-        params![cwd], |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional().map_err(|e| e.to_string())?;
+    let mapped: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT project_id, retained_project_id FROM agent_project_defaults WHERE cwd = ?1",
+            params![cwd],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
     if let Some((default_id, retained_id)) = mapped {
         if default_id == deleting {
-            if let Some(project) = list_projects(conn, Some(cwd))?.into_iter()
+            if let Some(project) = list_projects(conn, Some(cwd))?
+                .into_iter()
                 .find(|project| Some(&project.id) == retained_id.as_ref() && project.id != deleting)
             {
                 return Ok(project);
@@ -504,7 +532,8 @@ fn default_destination(
             conn.execute(
                 "UPDATE agent_project_defaults SET retained_project_id = ?1 WHERE cwd = ?2",
                 params![project.id, cwd],
-            ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
             return Ok(project);
         }
     }
@@ -515,7 +544,8 @@ fn migrate_legacy(
     conn: &mut Connection,
     legacy: Vec<LegacyProject>,
 ) -> Result<Vec<AgentProject>, String> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
     let mut candidates = std::collections::BTreeMap::new();
     for item in legacy {
@@ -523,7 +553,8 @@ fn migrate_legacy(
             candidates.entry(cwd).or_insert((item.name, item.archived));
         }
     }
-    let stored = tx.prepare("SELECT DISTINCT cwd FROM sessions")
+    let stored = tx
+        .prepare("SELECT DISTINCT cwd FROM sessions")
         .map_err(|e| e.to_string())?
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|e| e.to_string())?
@@ -537,30 +568,45 @@ fn migrate_legacy(
     // Explicit specialized memberships predate ordinary-chat ownership.
     sync_member_ownership(&tx)?;
     for (cwd, (name, archived)) in candidates {
-        let mapped: Option<String> = tx.query_row(
-            "SELECT project_id FROM agent_project_defaults WHERE cwd = ?1",
-            params![cwd], |row| row.get(0),
-        ).optional().map_err(|e| e.to_string())?;
+        let mapped: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM agent_project_defaults WHERE cwd = ?1",
+                params![cwd],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
         let project_id = match mapped {
             Some(id) => id,
             None => ensure_default(&tx, &cwd, Some(&name), archived)?.id,
         };
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_projects WHERE id = ?1)",
-            params![project_id], |row| row.get(0),
-        ).map_err(|e| e.to_string())?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_projects WHERE id = ?1)",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
         // A dangling mapping is a durable deletion marker, not an invitation to recreate.
-        if !exists { continue; }
-        let unassigned = tx.prepare("SELECT id, cwd FROM sessions WHERE project_id IS NULL")
+        if !exists {
+            continue;
+        }
+        let unassigned = tx
+            .prepare("SELECT id, cwd FROM sessions WHERE project_id IS NULL")
             .map_err(|e| e.to_string())?
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|e| e.to_string())?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| e.to_string())?;
         for (session_id, session_cwd) in unassigned {
             if normalize_cwd(&session_cwd).ok().as_deref() == Some(&cwd) {
-                tx.execute("UPDATE sessions SET project_id = ?1 WHERE id = ?2 AND project_id IS NULL",
-                    params![project_id, session_id]).map_err(|e| e.to_string())?;
+                tx.execute(
+                    "UPDATE sessions SET project_id = ?1 WHERE id = ?2 AND project_id IS NULL",
+                    params![project_id, session_id],
+                )
+                .map_err(|e| e.to_string())?;
             }
         }
     }
@@ -570,20 +616,31 @@ fn migrate_legacy(
 }
 
 pub(crate) fn sync_member_ownership(conn: &Connection) -> Result<(), String> {
-    let rows = conn.prepare(
-        "SELECT s.id, s.cwd, p.cwd, p.id FROM sessions s
+    let rows = conn
+        .prepare(
+            "SELECT s.id, s.cwd, p.cwd, p.id FROM sessions s
          JOIN agent_project_members m ON m.session_id = s.id
          JOIN agent_projects p ON p.id = m.project_id WHERE s.project_id IS NULL",
-    ).map_err(|e| e.to_string())?
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?, row.get::<_, String>(3)?)))
+        )
+        .map_err(|e| e.to_string())?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
         .map_err(|e| e.to_string())?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
     for (session_id, cwd, project_cwd, project_id) in rows {
         if normalize_cwd(&cwd).ok() == normalize_cwd(&project_cwd).ok() {
-            conn.execute("UPDATE sessions SET project_id = ?1 WHERE id = ?2 AND project_id IS NULL",
-                params![project_id, session_id]).map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE sessions SET project_id = ?1 WHERE id = ?2 AND project_id IS NULL",
+                params![project_id, session_id],
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -656,7 +713,11 @@ pub fn agent_projects_delete(
     id: String,
     disposition: Option<String>,
 ) -> Result<(), String> {
-    delete_project(&*store.lock_conn()?, &id, disposition.as_deref().unwrap_or("keep"))?;
+    delete_project(
+        &*store.lock_conn()?,
+        &id,
+        disposition.as_deref().unwrap_or("keep"),
+    )?;
     let _ = app.emit(CHANGED, ());
     Ok(())
 }
@@ -680,7 +741,8 @@ pub fn agent_projects_ensure_default(
     name: Option<String>,
 ) -> Result<AgentProject, String> {
     let mut conn = store.lock_conn()?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
     let project = ensure_default(&tx, &cwd, name.as_deref(), false)?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -957,5 +1019,95 @@ mod tests {
             .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn migrate_legacy_creates_defaults_and_assigns_sessions() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let mut conn = store.lock_conn().unwrap();
+        conn.execute_batch(
+            "INSERT INTO sessions(id, cwd, harness, model, runtime_mode, title, created_at, updated_at)
+             VALUES ('chat', '/repo/app', 'codex', 'default', 'local', 'Chat', 1, 1);",
+        )
+        .unwrap();
+        let projects = migrate_legacy(
+            &mut conn,
+            vec![LegacyProject {
+                cwd: "/repo/app".into(),
+                name: "App".into(),
+                archived: false,
+            }],
+        )
+        .unwrap();
+        let default = projects
+            .iter()
+            .find(|project| project.legacy_default && project.cwd == "/repo/app")
+            .unwrap();
+        assert_eq!(default.name, "App");
+        let owner: String = conn
+            .query_row(
+                "SELECT project_id FROM sessions WHERE id = 'chat'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, default.id);
+    }
+
+    #[test]
+    fn two_projects_can_share_a_repository() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let mut conn = store.lock_conn().unwrap();
+        save_project(&mut conn, project("one", "/repo")).unwrap();
+        save_project(&mut conn, project("two", "/repo")).unwrap();
+        assert_eq!(list_projects(&conn, Some("/repo")).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn delete_keep_moves_chats_to_the_folder_default() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let mut conn = store.lock_conn().unwrap();
+        conn.execute_batch(
+            "INSERT INTO sessions(id, cwd, harness, model, runtime_mode, title, created_at, updated_at)
+             VALUES ('chat', '/repo', 'codex', 'default', 'local', 'Chat', 1, 1);",
+        )
+        .unwrap();
+        let default = ensure_default(&conn, "/repo", Some("App"), false).unwrap();
+        let extra = save_project(&mut conn, project("extra", "/repo")).unwrap();
+        conn.execute(
+            "UPDATE sessions SET project_id = ?1 WHERE id = 'chat'",
+            params![extra.id],
+        )
+        .unwrap();
+        delete_project(&conn, "extra", "keep").unwrap();
+        let owner: String = conn
+            .query_row(
+                "SELECT project_id FROM sessions WHERE id = 'chat'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, default.id);
+        assert!(list_projects(&conn, None)
+            .unwrap()
+            .iter()
+            .all(|project| project.id != "extra"));
+    }
+
+    #[test]
+    fn delete_disposition_can_drop_owned_chats() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let mut conn = store.lock_conn().unwrap();
+        conn.execute_batch(
+            "INSERT INTO sessions(id, cwd, harness, model, runtime_mode, title, created_at, updated_at, project_id)
+             VALUES ('chat', '/repo', 'codex', 'default', 'local', 'Chat', 1, 1, 'one');",
+        )
+        .unwrap();
+        save_project(&mut conn, project("one", "/repo")).unwrap();
+        delete_project(&conn, "one", "delete").unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

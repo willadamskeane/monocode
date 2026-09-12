@@ -118,6 +118,12 @@ describe("agent project persistence", () => {
     await deleteAgentProject("project");
     expect(native).toHaveBeenLastCalledWith("agent_projects_delete", {
       id: "project",
+      disposition: "keep",
+    });
+    await deleteAgentProject("project", "delete");
+    expect(native).toHaveBeenLastCalledWith("agent_projects_delete", {
+      id: "project",
+      disposition: "delete",
     });
     await deleteAgentProjectsForCwd("/repo/child/../");
     expect(native).toHaveBeenLastCalledWith("agent_projects_delete_for_cwd", {

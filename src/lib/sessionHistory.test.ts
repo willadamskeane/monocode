@@ -208,6 +208,20 @@ describe("replaceProjectHistory", () => {
     const next = replaceProjectHistory(current, "/tmp/project-a", []);
     expect(next.map((row) => row.id)).toEqual(["b1"]);
   });
+
+  it("keeps sibling initiatives that share a folder", () => {
+    const current = [
+      { ...summary("a1", "/tmp/repo", 3), projectId: "alpha" },
+      { ...summary("b1", "/tmp/repo", 2), projectId: "beta" },
+    ];
+    const next = replaceProjectHistory(
+      current,
+      "/tmp/repo",
+      [{ ...summary("a2", "/tmp/repo", 5), projectId: "alpha" }],
+      "alpha",
+    );
+    expect(next.map((row) => row.id).sort()).toEqual(["a2", "b1"]);
+  });
 });
 
 describe("mergeProjectHistorySummary", () => {

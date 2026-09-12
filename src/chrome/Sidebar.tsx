@@ -1,7 +1,6 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Archive,
-  Bot,
   Check,
   ChevronDown,
   ChevronRight,
@@ -1765,7 +1764,7 @@ function SidebarProjectPicker({
   const logoPath = resolveTabGroupLogo(key, groupLogos);
   const color = resolveTabGroupColor(key, groupColors, groupCustomColors, seed);
   const projects: (RecentProject & { id?: string; name?: string })[] = agentProjects
-    ? agentProjects.filter((project) => !project.archived).map((project) => ({ id: project.id, name: project.name, path: project.cwd, lastOpened: project.updatedAt }))
+    ? agentProjects.filter((project) => !project.archived).map((project) => ({ id: project.id, name: project.name, path: project.cwd, openedAt: project.updatedAt }))
     : projectRailItems(recents, cwd);
   const isCurrent = (item: (typeof projects)[number]) => item.id ? item.id === activeProjectId : sameProjectPath(item.path, cwd);
   const orderedProjects = [

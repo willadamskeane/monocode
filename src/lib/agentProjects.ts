@@ -439,6 +439,7 @@ export async function applyAgentProjectContext(
   // Ordinary persisted chats carry ownership separately from those roles.
   if (
     owner === undefined &&
+    projects.length > 0 &&
     !projects.some((project) =>
       project.members.some((member) => member.sessionId === sessionId),
     )

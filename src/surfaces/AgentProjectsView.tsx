@@ -34,6 +34,8 @@ import {
 
 type Props = {
   cwd: string;
+  /** When set, the rail is the project switcher and this view is the detail. */
+  activeProjectId?: string;
   besideRail?: boolean;
   onClose: () => void;
   onToggleSidebar?: () => void;
@@ -131,6 +133,7 @@ function Label({ children, title }: { children: ReactNode; title: string }) {
 
 export function AgentProjectsView({
   cwd,
+  activeProjectId,
   besideRail = false,
   onClose,
   onToggleSidebar,
@@ -234,6 +237,12 @@ export function AgentProjectsView({
       window.removeEventListener("beforeunload", unload);
     };
   }, []);
+  useEffect(() => {
+    if (!activeProjectId) return;
+    setSelectedId(activeProjectId);
+    setCreating(false);
+  }, [activeProjectId]);
+  const railOwned = Boolean(activeProjectId);
   const selected = projects.find((project) => project.id === selectedId);
   const visible = projects.filter(
     (project) =>
@@ -285,7 +294,7 @@ export function AgentProjectsView({
           />
         )}
         <span className="px-3 text-xs font-medium text-content/60">
-          Projects
+          {selected?.name ?? "Projects"}
         </span>
         <div className="flex-1" />
         <button
@@ -300,7 +309,7 @@ export function AgentProjectsView({
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         <aside
           aria-label="Project list"
-          className={`${selected ? "hidden md:flex" : "flex"} max-h-full w-full shrink-0 flex-col border-content/10 md:w-64 md:border-r lg:w-72`}
+          className={`${railOwned ? "hidden" : selected ? "hidden md:flex" : "flex"} max-h-full w-full shrink-0 flex-col border-content/10 md:w-64 md:border-r lg:w-72`}
         >
           <div className="space-y-4 p-5">
             <div className="flex items-center justify-between">
@@ -434,7 +443,9 @@ export function AgentProjectsView({
               onBusy={(value) => {
                 busy.current = value;
               }}
-              onBack={() => guard(() => setSelectedId(null))}
+              onBack={
+                railOwned ? undefined : () => guard(() => setSelectedId(null))
+              }
               onOpenSession={(id) => guard(() => onOpenSession(id))}
               onStartSession={onStartSession}
               onSaved={(saved) => {
@@ -627,7 +638,7 @@ type DetailProps = Pick<
   onBusy: (busy: boolean) => void;
   onSaved: (project: AgentProject) => void;
   onRefresh: () => Promise<void>;
-  onBack: () => void;
+  onBack?: () => void;
   onArchive: () => void;
   onDelete: () => void;
   pending: boolean;
@@ -924,12 +935,14 @@ function ProjectDetail({
     <>
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-5xl px-5 py-6 sm:px-8">
+          {onBack ? (
           <button
             className="mb-5 text-xs text-content/50 hover:text-content md:hidden"
             onClick={onBack}
           >
             ← All projects
           </button>
+          ) : null}
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0 flex-1">
               <div className="mb-3 flex flex-wrap items-center gap-2">
