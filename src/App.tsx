@@ -288,6 +288,7 @@ import {
   ensureDefaultAgentProject,
   deleteAgentProject,
   subscribeAgentProjects,
+  isWorkspaceProject,
   type AgentProject,
   type AgentProjectSubscription,
 } from "./lib/agentProjects";
@@ -3460,6 +3461,17 @@ export default function App({
       activeProjectIdRef.current = project.id;
       setActiveProjectId(project.id);
 
+      const coordinator = project.members.find(
+        (member) => member.role === "coordinator",
+      );
+      if (coordinator) {
+        setProjectCwd(normalized);
+        setRecents(rememberProject(normalized));
+        setAgentProjectsViewOpen(false);
+        void onSelectHistorySession(coordinator.sessionId);
+        return;
+      }
+
       const activeWorkspace = tabsRef.current.find(
         (entry) => entry.id === activeTabIdRef.current,
       );
@@ -3480,40 +3492,47 @@ export default function App({
         case "keep":
           setProjectCwd(normalized);
           setRecents(rememberProject(normalized));
-          return;
+          break;
         case "reuse-blank":
           onCwdChange(decision.sessionId, normalized);
-          return;
+          break;
         case "activate":
           setProjectCwd(normalized);
           setRecents(rememberProject(normalized));
           activateTab(decision.tabId, decision.paneId);
-          return;
-        case "create":
           break;
+        case "create": {
+          const seed = current ?? sessionsRef.current[0];
+          const session = newSession(
+            seed?.harness ?? "claude",
+            normalized,
+            seed?.model,
+            seed?.runtimeMode,
+            seed?.modelSettings,
+          );
+          const tab = newTab(session.id);
+          setProjectCwd(normalized);
+          setRecents(rememberProject(normalized));
+          setSessions((prev) => [...prev, session]);
+          appendTab(tab, normalized);
+          setActiveTabId(tab.id);
+          setComposerFocused(true);
+          break;
+        }
         default: {
           const exhaustive: never = decision;
           return exhaustive;
         }
       }
-
-      const seed = current ?? sessionsRef.current[0];
-      const session = newSession(
-        seed?.harness ?? "claude",
-        normalized,
-        seed?.model,
-        seed?.runtimeMode,
-        seed?.modelSettings,
-      );
-      const tab = newTab(session.id);
-      setProjectCwd(normalized);
-      setRecents(rememberProject(normalized));
-      setSessions((prev) => [...prev, session]);
-      appendTab(tab, normalized);
-      setActiveTabId(tab.id);
-      setComposerFocused(true);
+      if (!isWorkspaceProject(project)) setAgentProjectsViewOpen(true);
     },
-    [activateTab, appendTab, onCwdChange, readProjectReturnMemory],
+    [
+      activateTab,
+      appendTab,
+      onCwdChange,
+      onSelectHistorySession,
+      readProjectReturnMemory,
+    ],
   );
 
   const onSelectAgentProject = useCallback(
@@ -6399,7 +6418,7 @@ export default function App({
       {createProjectOpen ? (
         <Modal
           title="New project"
-          description="A persistent initiative in this repository. The folder is a property, not the identity."
+          description="Name the body of work. The current repository stays connected; you can start another project in the same checkout."
           size="sm"
           onClose={() => {
             if (!createProjectBusy) setCreateProjectOpen(false);

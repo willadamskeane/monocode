@@ -335,8 +335,7 @@ export function AgentProjectsView({
               </button>
             </div>
             <p className="text-xs leading-relaxed text-content/50">
-              Persistent goals and initiatives, not repository folders. A
-              coordinator, workers, and shared context in one place.
+              A coordinator, workers, and shared context for one body of work.
             </p>
             <p
               className="truncate font-mono text-[10px] text-content/40"

@@ -181,6 +181,14 @@ function validateProject(project: AgentProject): AgentProject {
   return { ...project, cwd };
 }
 
+/** No coordinator and no goal: a repo workspace. Cursor analog: an opened folder. */
+export function isWorkspaceProject(project: AgentProject): boolean {
+  return (
+    !project.goal.trim() &&
+    !project.members.some((member) => member.role === "coordinator")
+  );
+}
+
 export function createAgentProject(
   cwd: string,
   name: string,

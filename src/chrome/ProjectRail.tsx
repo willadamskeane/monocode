@@ -74,7 +74,7 @@ import { Shimmer } from "../surfaces/Shimmer";
 import { TabGroupMenu, type TabGroupMenuExtraItem } from "./TabGroupMenu";
 import { TerminalSpinner } from "./TerminalSpinner";
 import type { SettingsSectionId } from "../lib/settings";
-import type { AgentProject } from "../lib/agentProjects";
+import { isWorkspaceProject, type AgentProject } from "../lib/agentProjects";
 import {
   loadProjectOrder,
   saveProjectOrder,
@@ -95,8 +95,33 @@ export type AgentProjectNavigationProps = {
   approvalProjectIds?: ReadonlySet<string>;
 };
 
-type ProjectItem = RecentProject & { id?: string; name?: string };
+type ProjectItem = RecentProject & {
+  id?: string;
+  name?: string;
+  goal?: string;
+  workspace?: boolean;
+};
 const itemId = (item: ProjectItem) => item.id ?? item.path;
+
+function formatProjectAge(value: number, now: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const seconds = Math.max(0, Math.round((now - value) / 1000));
+  if (seconds < 60) return "now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d`;
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+    }).format(new Date(value));
+  } catch {
+    return "";
+  }
+}
 
 const REVEAL_LABEL = IS_MAC
   ? "Reveal in Finder"
@@ -215,6 +240,7 @@ export function ProjectRail({
   const [pinnedPaths, setPinnedPaths] = useState(loadPinnedProjects);
   const [idOrder, setIdOrder] = useState(loadProjectOrder);
   const [pinnedProjectIds, setPinnedProjectIds] = useState(loadPinnedProjectIds);
+  const [now, setNow] = useState(() => Date.now());
   const [groupLabels, setGroupLabels] = useState(loadTabGroupLabels);
   const [groupColors, setGroupColors] = useState(loadTabGroupColors);
   const [groupMascots, setGroupMascots] = useState(loadTabGroupMascots);
@@ -251,7 +277,14 @@ export function ProjectRail({
     const items: ProjectItem[] = order.flatMap((id) => {
       const project = records.find((record) => record.id === id);
       return project
-        ? [{ id, name: project.name, path: project.cwd, openedAt: project.updatedAt }]
+        ? [{
+            id,
+            name: project.name,
+            path: project.cwd,
+            openedAt: project.updatedAt,
+            goal: project.goal,
+            workspace: isWorkspaceProject(project),
+          }]
         : [];
     });
     const pinned = new Set(pinnedProjectIds);
@@ -261,6 +294,10 @@ export function ProjectRail({
     };
   }, [agentProjects, idOrder, pinnedProjectIds, cwd, pinnedPaths, railOrder, recents]);
   const selectProject = (id: string) => agentProjects ? onSelectAgentProject?.(id) : onSelectProject(id);
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
   useEffect(() => {
     if (!agentProjects) return;
     setIdOrder((previous) => {
@@ -551,6 +588,7 @@ export function ProjectRail({
                 groupCustomColors={groupCustomColors}
                 groupLogos={groupLogos}
                 groupMascots={groupMascots}
+                now={now}
               />
             ) : null}
 
@@ -559,7 +597,7 @@ export function ProjectRail({
               items={sections.projects}
               emptyLabel="No projects yet"
               onAdd={onCreateAgentProject ?? onOpenProject}
-              addLabel={agentProjects ? "New project" : "Open project"}
+              addLabel={agentProjects ? "New project" : "Open repository"}
               cwd={cwd}
               activeProjectId={activeProjectId}
               busyProjectIds={busyProjectIds}
@@ -581,6 +619,7 @@ export function ProjectRail({
               groupCustomColors={groupCustomColors}
               groupLogos={groupLogos}
               groupMascots={groupMascots}
+              now={now}
             />
           </div>
           <LiveAgentsPreview
@@ -914,6 +953,7 @@ function ProjectSection({
   groupCustomColors,
   groupLogos,
   groupMascots,
+  now,
 }: {
   label: string;
   items: ProjectItem[];
@@ -937,6 +977,7 @@ function ProjectSection({
   groupCustomColors: Record<string, string>;
   groupLogos: ReturnType<typeof useTabGroupLogos>;
   groupMascots: Record<string, string>;
+  now: number;
 }) {
   return (
     <div className="shrink-0 mb-2">
@@ -981,6 +1022,7 @@ function ProjectSection({
             groupCustomColors={groupCustomColors}
             groupLogos={groupLogos}
             groupMascots={groupMascots}
+            now={now}
           />
         ))}
       </div>
@@ -1008,6 +1050,7 @@ function ProjectCard({
   groupCustomColors,
   groupLogos,
   groupMascots,
+  now,
 }: {
   item: ProjectItem;
   selected: boolean;
@@ -1025,6 +1068,7 @@ function ProjectCard({
   groupCustomColors: Record<string, string>;
   groupLogos: ReturnType<typeof useTabGroupLogos>;
   groupMascots: Record<string, string>;
+  now: number;
 }) {
   const fallbackName = basename(item.path);
   const id = itemId(item);
@@ -1057,7 +1101,7 @@ function ProjectCard({
     <div
       ref={(el) => sortable.setItemRef(id, el)}
       data-project-id={item.id}
-      className={`group relative flex touch-none items-stretch rounded-md px-2 ${item.id ? "h-12" : "h-8"} ${
+      className={`group relative flex touch-none items-stretch rounded-md px-2 ${item.goal?.trim() ? "h-12" : "h-8"} ${
         selected
           ? "bg-content/12 text-content"
           : "opacity-65 hover:bg-content/5 hover:text-content"
@@ -1116,10 +1160,18 @@ function ProjectCard({
         ) : (
           <span className={nameClassName}>{name}</span>
         )}
-        {item.id ? <span className="block truncate text-[10px] font-normal text-content/45">{item.path}</span> : null}
+        {item.goal?.trim() ? (
+          <span className="block truncate text-[10px] font-normal text-content/45">
+            {item.goal.trim()}
+          </span>
+        ) : null}
         </span>
         {needsApproval ? <CircleAlert aria-label="Needs approval" className="size-3.5 shrink-0 text-amber-400" /> : null}
-        {hasChanges ? (
+        {item.id ? (
+          <span className="shrink-0 text-[11px] tabular-nums text-content/40 group-hover:hidden">
+            {formatProjectAge(item.openedAt, now)}
+          </span>
+        ) : hasChanges ? (
           <span className="shrink-0 group-hover:hidden">
             <ProjectDiffStat additions={additions} deletions={deletions} />
           </span>

@@ -9,6 +9,7 @@ import {
   createAgentProject,
   deleteAgentProject,
   deleteAgentProjectsForCwd,
+  isWorkspaceProject,
   loadAgentProjects,
   saveAgentProject,
   subscribeAgentProjects,
@@ -43,6 +44,13 @@ beforeEach(() => {
 });
 
 describe("agent project persistence", () => {
+  it("treats a project without a goal or coordinator as a workspace", () => {
+    expect(isWorkspaceProject(project({ goal: "", members: [] }))).toBe(true);
+    expect(isWorkspaceProject(project({ goal: "  ", members: [] }))).toBe(true);
+    expect(isWorkspaceProject(project({ legacyDefault: true }))).toBe(false);
+    expect(isWorkspaceProject(project())).toBe(false);
+  });
+
   it("creates an unsaved UUID project and leaves timestamps to native", () => {
     const created = createAgentProject("/repo/./", "Plan", "Goal");
     expect(created.id).toMatch(/^[a-f0-9-]{36}$/);
