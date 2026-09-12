@@ -9,6 +9,7 @@ import {
   type FilePaneTab,
   type LayoutNode,
   type PlanTabSource,
+  type ProjectDocumentSource,
   type SessionChangesSource,
   type WorkspaceTab,
 } from "./layout";
@@ -485,6 +486,7 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
   if (typeof value.path !== "string" || !value.path) return null;
   if (typeof value.cwd !== "string" || !value.cwd) return null;
   const plan = sanitizePlan(value.plan);
+  const projectDocument = sanitizeProjectDocument(value.projectDocument);
   const hasReleaseNotes = "releaseNotes" in value;
   const releaseNotes = sanitizeReleaseNotes(value.releaseNotes);
   const hasCommit = "commit" in value;
@@ -530,6 +532,7 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
     path: value.path,
     cwd: value.cwd,
     ...(plan ? { plan } : {}),
+    ...(projectDocument ? { projectDocument } : {}),
     ...(releaseNotes ? { releaseNotes } : {}),
     ...(commit ? { commit } : {}),
     ...(sessionChanges ? { sessionChanges, review: true } : {}),
@@ -603,6 +606,23 @@ function sanitizeProjectTerminal(raw: unknown): ProjectTerminalDock | null {
 function validProjectId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 &&
     value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function sanitizeProjectDocument(
+  raw: unknown,
+): ProjectDocumentSource | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.projectId !== "string" || !value.projectId.trim())
+    return undefined;
+  if (typeof value.documentId !== "string" || !value.documentId.trim())
+    return undefined;
+  if (typeof value.name !== "string" || !value.name.trim()) return undefined;
+  return {
+    projectId: value.projectId.trim(),
+    documentId: value.documentId.trim(),
+    name: value.name.trim(),
+  };
 }
 
 function sanitizePlan(raw: unknown): PlanTabSource | undefined {

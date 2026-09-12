@@ -189,6 +189,16 @@ export function isWorkspaceProject(project: AgentProject): boolean {
   );
 }
 
+export function coordinatorMember(project: AgentProject) {
+  return project.members.find((member) => member.role === "coordinator");
+}
+
+/** First coordinator turn is the project brief, same as typing it in chat. */
+export function coordinatorPrompt(project: AgentProject): string {
+  const goal = project.goal.trim();
+  return goal || `Help coordinate ${project.name.trim() || "this project"}.`;
+}
+
 export function createAgentProject(
   cwd: string,
   name: string,

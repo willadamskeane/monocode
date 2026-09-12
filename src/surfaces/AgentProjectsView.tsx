@@ -23,12 +23,14 @@ import { WindowControls } from "../chrome/WindowControls";
 import { IS_MAC } from "../lib/platform";
 import type { SessionSummary } from "../lib/sessionStore";
 import {
+  coordinatorPrompt,
   createAgentProject,
   deleteAgentProject,
   loadAgentProjects,
   saveAgentProject,
   subscribeAgentProjects,
   type AgentProject,
+  type AgentProjectDocument,
   type AgentProjectSubscription,
 } from "../lib/agentProjects";
 
@@ -36,12 +38,14 @@ type Props = {
   cwd: string;
   /** When set, the rail is the project switcher and this view is the detail. */
   activeProjectId?: string;
+  variant?: "overlay" | "pane";
   besideRail?: boolean;
   onClose: () => void;
   onToggleSidebar?: () => void;
   sessions: readonly SessionSummary[];
   busySessionIds: ReadonlySet<string>;
   onOpenSession: (id: string) => void;
+  onOpenDocument?: (document: AgentProjectDocument) => void;
   onStartSession: (
     project: AgentProject,
     role: "coordinator" | "worker",
@@ -134,12 +138,14 @@ function Label({ children, title }: { children: ReactNode; title: string }) {
 export function AgentProjectsView({
   cwd,
   activeProjectId,
+  variant = "overlay",
   besideRail = false,
   onClose,
   onToggleSidebar,
   sessions,
   busySessionIds,
   onOpenSession,
+  onOpenDocument,
   onStartSession,
 }: Props) {
   const [projects, setProjects] = useState<AgentProject[]>([]);
@@ -242,7 +248,8 @@ export function AgentProjectsView({
     setSelectedId(activeProjectId);
     setCreating(false);
   }, [activeProjectId]);
-  const railOwned = Boolean(activeProjectId);
+  const pane = variant === "pane";
+  const railOwned = Boolean(activeProjectId) || pane;
   const selected = projects.find((project) => project.id === selectedId);
   const visible = projects.filter(
     (project) =>
@@ -279,32 +286,31 @@ export function AgentProjectsView({
   };
   return (
     <section
-      aria-label="Projects workspace"
-      className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background-base text-content"
+      aria-label={pane ? "Project" : "Projects workspace"}
+      className={`flex h-full min-h-0 min-w-0 flex-col bg-background-base text-content ${pane ? "border-l border-content/10" : "flex-1"}`}
     >
       <header
-        data-tauri-drag-region="deep"
+        data-tauri-drag-region={pane ? undefined : "deep"}
         className="flex h-10 shrink-0 items-center border-b border-content/10"
       >
-        {IS_MAC && !besideRail ? <div className="w-[78px] shrink-0" /> : null}
-        {!besideRail && (
+        {IS_MAC && !besideRail && !pane ? <div className="w-[78px] shrink-0" /> : null}
+        {!besideRail && !pane && (
           <OverlayNav
             onBack={() => guard(onClose)}
             onToggleSidebar={onToggleSidebar}
           />
         )}
-        <span className="px-3 text-xs font-medium text-content/60">
+        <span className="min-w-0 flex-1 truncate px-3 text-xs font-medium text-content/60">
           {selected?.name ?? "Projects"}
         </span>
-        <div className="flex-1" />
         <button
           className={`${button} mr-2 border-0 p-1.5`}
-          aria-label="Close Projects"
+          aria-label={pane ? "Close Project" : "Close Projects"}
           onClick={() => guard(onClose)}
         >
           <X className="size-4" />
         </button>
-        {!IS_MAC && <WindowControls />}
+        {!IS_MAC && !pane && <WindowControls />}
       </header>
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         <aside
@@ -447,6 +453,7 @@ export function AgentProjectsView({
               }
               onOpenSession={(id) => guard(() => onOpenSession(id))}
               onStartSession={onStartSession}
+              onOpenDocument={onOpenDocument}
               onSaved={(saved) => {
                 setProjects((current) =>
                   current.map((item) => (item.id === saved.id ? saved : item)),
@@ -630,7 +637,11 @@ export function AgentProjectsView({
 
 type DetailProps = Pick<
   Props,
-  "sessions" | "busySessionIds" | "onOpenSession" | "onStartSession"
+  | "sessions"
+  | "busySessionIds"
+  | "onOpenSession"
+  | "onOpenDocument"
+  | "onStartSession"
 > & {
   project: AgentProject;
   onDirty: (dirty: boolean) => void;
@@ -648,6 +659,7 @@ function ProjectDetail({
   sessions,
   busySessionIds,
   onOpenSession,
+  onOpenDocument,
   onStartSession,
   onDirty,
   onBusy,
@@ -772,12 +784,8 @@ function ProjectDetail({
       await onStartSession(
         fresh,
         role,
-        role === "coordinator"
-          ? `Help coordinate this initiative: ${fresh.goal}\nReview the shared context, propose a plan, and identify focused tasks to delegate.`
-          : task.trim(),
-        role === "coordinator"
-          ? `${fresh.name} · Coordinator`
-          : taskTitle.trim(),
+        role === "coordinator" ? coordinatorPrompt(fresh) : task.trim(),
+        role === "coordinator" ? fresh.name : taskTitle.trim(),
       );
       setTask("");
       setTaskTitle("");
@@ -1258,6 +1266,15 @@ function ProjectDetail({
                           })
                         }
                       />
+                      {onOpenDocument ? (
+                        <button
+                          type="button"
+                          className={button}
+                          onClick={() => onOpenDocument(doc)}
+                        >
+                          Open
+                        </button>
+                      ) : null}
                       <button
                         className={button}
                         onClick={() =>

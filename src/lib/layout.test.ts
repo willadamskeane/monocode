@@ -16,6 +16,7 @@ import {
   newCommitTab,
   newFileTab,
   newPlanTab,
+  newProjectDocumentTab,
   newReleaseNotesWorkspaceTab,
   newSessionChangesTab,
   newTab,
@@ -112,6 +113,15 @@ describe("editorTabKey", () => {
       ),
     ).toBe(`commit:${cwd}:abc1234deadbeef`);
     expect(editorTabKey(newPlanTab("s", "b", "Plan", cwd))).toBe("plan:b");
+    expect(
+      editorTabKey(
+        newProjectDocumentTab(cwd, {
+          projectId: "p1",
+          documentId: "d1",
+          name: "Spec",
+        }),
+      ),
+    ).toBe("project-doc:p1:d1");
     const terminal = newTerminalFile(cwd);
     expect(editorTabKey(terminal)).toBe(`terminal:${terminal.id}`);
     expect(isTerminalTab(terminal)).toBe(true);

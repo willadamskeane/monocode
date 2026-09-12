@@ -12,7 +12,8 @@ const api = vi.hoisted(() => ({
   create: vi.fn(),
   subscribe: vi.fn(),
 }));
-vi.mock("../lib/agentProjects", () => ({
+vi.mock("../lib/agentProjects", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/agentProjects")>()),
   loadAgentProjects: api.load,
   saveAgentProject: api.save,
   deleteAgentProject: api.remove,
@@ -215,6 +216,25 @@ describe("Projects workspace", () => {
     expect(list?.className).toContain("hidden");
     expect(container.textContent).toContain("Release readiness");
     expect(container.textContent).not.toContain("← All projects");
+  });
+
+  it("renders beside the chat as a Project pane", async () => {
+    await act(async () =>
+      root.render(
+        createElement(AgentProjectsView, {
+          ...props,
+          activeProjectId: "project-1",
+          variant: "pane",
+        }),
+      ),
+    );
+    expect(container.querySelector('[aria-label="Project"]')).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Close Project"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[aria-label="Project list"]')?.className).toContain(
+      "hidden",
+    );
   });
 
   it("loads only the current folder and creates a named initiative with a goal", async () => {
@@ -481,7 +501,7 @@ describe("Projects workspace", () => {
       expect.objectContaining({ id: "project-1" }),
       "coordinator",
       expect.stringContaining("Ship a reliable release"),
-      "Release readiness · Coordinator",
+      "Release readiness",
     );
     const member = [
       ...container.querySelectorAll<HTMLButtonElement>("button"),
@@ -511,7 +531,7 @@ describe("Projects workspace", () => {
       expect.objectContaining({ members: records[0].members }),
       "coordinator",
       expect.stringContaining("Ship a reliable release"),
-      "Release readiness · Coordinator",
+      "Release readiness",
     );
     expect(api.save).not.toHaveBeenCalled();
   });
@@ -552,7 +572,7 @@ describe("Projects workspace", () => {
       expect.objectContaining({ id: "project-1" }),
       "coordinator",
       expect.stringContaining("Ship a reliable release"),
-      "Release readiness · Coordinator",
+      "Release readiness",
     );
     expect(api.save).not.toHaveBeenCalled();
     await click("Agents");

@@ -47,7 +47,7 @@ Small, focused pull requests are welcome. Anything large is worth an issue first
 The **Projects** list in the sidebar is the switcher. Opening a repository creates a workspace project (MonoCode's previous folder rail; Cursor's Open Folder). **New project** starts an initiative in that checkout: a coordinator, workers, shared context, and schedules (Cursor's [Projects](https://cursor.com/blog/projects), local-only). Multiple initiatives can share a repository.
 
 - Open a repository to work in it, or choose **New project** for a named body of work in the same checkout.
-- Give a project a goal, then start or resume its coordinator from the project overview. Delegate focused tasks to separate worker sessions; review the prepared message and choose a provider in the normal composer before sending.
+- A goal becomes the coordinator's first message and opens that chat, with the Project pane beside it. Delegate workers from the pane; review the draft and send from the normal composer.
 - Save shared instructions and context documents. Project members receive the latest saved context and bounded excerpts from other members' completed replies on each turn, including when switching providers. The coordinator can delegate through the selected provider's native subagent tools where supported.
 - Add opt-in, recurring **local subscriptions**. Each occurrence starts a fresh supervised worker using your default provider while MonoCode is open. Missed intervals are coalesced, not replayed. Workers may run in parallel in the same checkout, so review concurrent edits carefully. Errors appear in the workspace.
 - Archive a project to pause its subscriptions. Deleting an agent project removes its context and schedules, but keeps its conversations and repository files.

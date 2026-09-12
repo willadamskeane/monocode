@@ -11,6 +11,7 @@ const BODY_KEY = "monocode.bodyGlass";
 const SCHEME_KEY = "monocode.colorScheme";
 const SIDEBAR_TAB_ORDER_KEY = "monocode.sidebarTabOrder";
 const PROJECT_RAIL_WIDTH_KEY = "monocode.projectRailWidth";
+const PROJECT_PANE_WIDTH_KEY = "monocode.projectPaneWidth";
 const TRANSCRIPT_LAYOUT_KEY = "monocode.transcriptLayout";
 const TRANSCRIPT_ANCHOR_KEY = "monocode.transcriptAnchor";
 const CHAT_BACKGROUND_PATH_KEY = "monocode.chatBackgroundPath";
@@ -74,6 +75,10 @@ export const SIDEBAR_BLUR_DEFAULT = 24;
 export const PROJECT_RAIL_WIDTH_MIN = 180;
 export const PROJECT_RAIL_WIDTH_MAX = 360;
 export const PROJECT_RAIL_WIDTH_DEFAULT = 200;
+
+export const PROJECT_PANE_WIDTH_MIN = 240;
+export const PROJECT_PANE_WIDTH_MAX = 420;
+export const PROJECT_PANE_WIDTH_DEFAULT = 300;
 
 export const BODY_GLASS_DEFAULT = true;
 
@@ -478,6 +483,25 @@ export function saveProjectRailWidth(value: number) {
     PROJECT_RAIL_WIDTH_KEY,
     Math.round(
       clamp(value, PROJECT_RAIL_WIDTH_MIN, PROJECT_RAIL_WIDTH_MAX),
+    ),
+  );
+}
+
+export function loadProjectPaneWidth(): number {
+  return Math.round(
+    clamp(
+      readNumber(PROJECT_PANE_WIDTH_KEY) ?? PROJECT_PANE_WIDTH_DEFAULT,
+      PROJECT_PANE_WIDTH_MIN,
+      PROJECT_PANE_WIDTH_MAX,
+    ),
+  );
+}
+
+export function saveProjectPaneWidth(value: number) {
+  writeNumber(
+    PROJECT_PANE_WIDTH_KEY,
+    Math.round(
+      clamp(value, PROJECT_PANE_WIDTH_MIN, PROJECT_PANE_WIDTH_MAX),
     ),
   );
 }

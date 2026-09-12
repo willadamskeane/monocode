@@ -207,6 +207,10 @@ type Props = AgentProjectNavigationProps & {
   onCancelReminders?: (sessionIds: readonly string[]) => void;
   onDeleteSession?: (sessionId: string) => void;
   onDeleteSessions?: (sessionIds: readonly string[]) => void;
+  onAssignSessionsToProject?: (
+    sessionIds: readonly string[],
+    projectId: string,
+  ) => void;
   onOpenFile: (path: string) => void;
   onOpenTerminal?: (cwd: string) => void;
   onFileMoved?: (from: string, to: string) => void;
@@ -285,6 +289,7 @@ function SidebarComponent({
   onCancelReminders,
   onDeleteSession,
   onDeleteSessions,
+  onAssignSessionsToProject,
   onOpenFile,
   onOpenTerminal,
   onFileMoved,
@@ -772,6 +777,29 @@ function SidebarComponent({
           folder.sessionIds.includes(sessionId),
         ),
     })),
+    ...(onAssignSessionsToProject &&
+    (agentProjects?.filter((project) => !project.archived).length ?? 0) > 0
+      ? [
+          { kind: "sep" as const },
+          {
+            kind: "item" as const,
+            id: "add-to-project",
+            label: "Add to project",
+            submenu: (agentProjects ?? [])
+              .filter((project) => !project.archived)
+              .map((project) => ({
+                kind: "item" as const,
+                id: `project-add:${project.id}`,
+                label: project.name,
+                checked:
+                  menuSessions.length > 0 &&
+                  menuSessions.every(
+                    (session) => session.projectId === project.id,
+                  ),
+              })),
+          },
+        ]
+      : []),
     ...(canRemoveMenuSessionsFromFolders
       ? [
           {
@@ -853,6 +881,13 @@ function SidebarComponent({
     const archived = allMenuSessionsArchived;
     const pinned = allMenuSessionsPinned;
     closeSessionMenu();
+    if (id.startsWith("project-add:")) {
+      onAssignSessionsToProject?.(
+        sessionIds,
+        id.slice("project-add:".length),
+      );
+      return;
+    }
     if (id === "reminder:cancel") {
       onCancelReminders?.(sessionIds);
       return;

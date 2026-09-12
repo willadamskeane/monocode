@@ -9,6 +9,7 @@ import {
   isCommitTab,
   isFilesystemTab,
   isPlanTab,
+  isProjectDocumentTab,
   isReleaseNotesTab,
   isReviewTab,
   isSessionChangesTab,
@@ -125,14 +126,20 @@ export function surfaceTabPresentation(
   const terminal = isTerminalTab(file);
   const name = isPlanTab(file)
     ? file.plan.title.trim() || "Plan"
+    : isProjectDocumentTab(file)
+      ? file.projectDocument.name.trim() || "Document"
     : terminal
       ? terminalTabLabel(file)
       : basename(file.path);
   return {
     name,
     label: review ? `${name} (Working Tree)` : name,
-    iconName: isPlanTab(file) ? "plan.md" : name,
-    tooltip: isPlanTab(file)
+    iconName: isPlanTab(file)
+      ? "plan.md"
+      : isProjectDocumentTab(file)
+        ? `${name}.md`
+        : name,
+    tooltip: isPlanTab(file) || isProjectDocumentTab(file)
       ? name
       : terminal
         ? `${name} — ${file.cwd}`

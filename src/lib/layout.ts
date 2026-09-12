@@ -36,6 +36,12 @@ export type PlanTabSource = {
   title: string;
 };
 
+export type ProjectDocumentSource = {
+  projectId: string;
+  documentId: string;
+  name: string;
+};
+
 export type CommitTabSource = {
   sha: string;
   shortSha: string;
@@ -51,6 +57,7 @@ export type FilePaneTab = {
   path: string;
   cwd: string;
   plan?: PlanTabSource;
+  projectDocument?: ProjectDocumentSource;
   releaseNotes?: ReleaseNotesTabSource;
   review?: boolean;
   /** Single working-tree review of every changed file (unified diff). */
@@ -173,6 +180,18 @@ export function newPlanTab(
   };
 }
 
+export function newProjectDocumentTab(
+  cwd: string,
+  source: ProjectDocumentSource,
+): FilePaneTab {
+  return {
+    id: crypto.randomUUID(),
+    path: `project-doc:${source.projectId}:${source.documentId}`,
+    cwd,
+    projectDocument: source,
+  };
+}
+
 export function newReleaseNotesWorkspaceTab(
   releaseNotes: ReleaseNotesTabSource,
 ): WorkspaceTab {
@@ -289,6 +308,12 @@ export function isPlanTab(
   return !!file.plan;
 }
 
+export function isProjectDocumentTab(
+  file: FilePaneTab,
+): file is FilePaneTab & { projectDocument: ProjectDocumentSource } {
+  return !!file.projectDocument;
+}
+
 export function isReleaseNotesTab(
   file: FilePaneTab,
 ): file is FilePaneTab & { releaseNotes: ReleaseNotesTabSource } {
@@ -306,7 +331,12 @@ export function isTerminalTab(file: FilePaneTab): boolean {
 }
 
 export function isVirtualDocumentTab(file: FilePaneTab): boolean {
-  return isPlanTab(file) || isReleaseNotesTab(file) || isCommitTab(file);
+  return (
+    isPlanTab(file) ||
+    isProjectDocumentTab(file) ||
+    isReleaseNotesTab(file) ||
+    isCommitTab(file)
+  );
 }
 
 export function isFilesystemTab(file: FilePaneTab): boolean {
@@ -386,6 +416,8 @@ export function isSessionChangesTab(
 export function editorTabKey(file: FilePaneTab): string {
   if (file.terminal) return `terminal:${file.id}`;
   if (file.plan) return `plan:${file.plan.blockId}`;
+  if (file.projectDocument)
+    return `project-doc:${file.projectDocument.projectId}:${file.projectDocument.documentId}`;
   if (file.releaseNotes) return `release-notes:${file.releaseNotes.version}`;
   if (file.commit) return `commit:${file.cwd}:${file.commit.sha}`;
   if (file.sessionChanges)

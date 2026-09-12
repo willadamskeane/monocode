@@ -19,9 +19,15 @@ import { MenuBar } from "./chrome/MenuBar";
 import { FilePicker } from "./chrome/FilePicker";
 import { UsageFooter } from "./chrome/UsageFooter";
 import { useProjectBranches } from "./hooks/useProjectBranches";
+import { useDragResize } from "./hooks/useDragResize";
 import {
+  loadProjectPaneWidth,
   loadProjectRailOpen,
   loadSidebarTabOrder,
+  PROJECT_PANE_WIDTH_DEFAULT,
+  PROJECT_PANE_WIDTH_MAX,
+  PROJECT_PANE_WIDTH_MIN,
+  saveProjectPaneWidth,
   saveProjectRailOpen,
   type SidebarTabId,
 } from "./lib/appearance";
@@ -66,6 +72,7 @@ import {
   neighborLeafId,
   newFileTab,
   newPlanTab,
+  newProjectDocumentTab,
   newTab as createWorkspaceTab,
   newTerminalFile,
   newTerminalWorkspaceTab,
@@ -255,6 +262,7 @@ import {
 } from "./lib/messageQueue";
 import { dropContextWindow } from "./lib/contextUsage";
 import {
+  assignSessionProject,
   deleteSession,
   getSession,
   listLinkedSessions,
@@ -289,7 +297,10 @@ import {
   deleteAgentProject,
   subscribeAgentProjects,
   isWorkspaceProject,
+  coordinatorMember,
+  coordinatorPrompt,
   type AgentProject,
+  type AgentProjectDocument,
   type AgentProjectSubscription,
 } from "./lib/agentProjects";
 import {
@@ -629,6 +640,15 @@ export default function App({
   const [createProjectName, setCreateProjectName] = useState("");
   const [createProjectGoal, setCreateProjectGoal] = useState("");
   const [createProjectBusy, setCreateProjectBusy] = useState(false);
+  const projectPaneResize = useDragResize({
+    direction: "left",
+    min: PROJECT_PANE_WIDTH_MIN,
+    max: () =>
+      Math.min(PROJECT_PANE_WIDTH_MAX, Math.floor(window.innerWidth * 0.45)),
+    defaultWidth: PROJECT_PANE_WIDTH_DEFAULT,
+    initial: loadProjectPaneWidth(),
+    onCommit: saveProjectPaneWidth,
+  });
   const newSession = useCallback((...args: Parameters<typeof createSession>): Session => ({
     ...createSession(...args),
     projectId: activeProjectIdRef.current,
@@ -3461,14 +3481,43 @@ export default function App({
       activeProjectIdRef.current = project.id;
       setActiveProjectId(project.id);
 
-      const coordinator = project.members.find(
-        (member) => member.role === "coordinator",
-      );
+      const coordinator = coordinatorMember(project);
+      const initiative = !isWorkspaceProject(project);
       if (coordinator) {
         setProjectCwd(normalized);
         setRecents(rememberProject(normalized));
-        setAgentProjectsViewOpen(false);
+        setAgentProjectsViewOpen(initiative);
         void onSelectHistorySession(coordinator.sessionId);
+        for (const member of project.members) {
+          if (member.sessionId === coordinator.sessionId) continue;
+          void ensureOpenSession(member.sessionId).then((session) => {
+            if (!session) return;
+            setSessions((prev) =>
+              prev.some((entry) => entry.id === session.id)
+                ? prev
+                : [...prev, session],
+            );
+            if (
+              !tabsRef.current.some((tab) =>
+                leafIds(tab.layout).includes(session.id),
+              )
+            ) {
+              appendTab(newTab(session.id), session.cwd);
+            }
+          });
+        }
+        return;
+      }
+      if (initiative) {
+        setProjectCwd(normalized);
+        setRecents(rememberProject(normalized));
+        setAgentProjectsViewOpen(true);
+        void startProjectAgentRef.current(
+          project,
+          "coordinator",
+          coordinatorPrompt(project),
+          project.name,
+        );
         return;
       }
 
@@ -3524,11 +3573,13 @@ export default function App({
           return exhaustive;
         }
       }
-      if (!isWorkspaceProject(project)) setAgentProjectsViewOpen(true);
+      setAgentProjectsViewOpen(false);
     },
     [
       activateTab,
       appendTab,
+      ensureOpenSession,
+      newTab,
       onCwdChange,
       onSelectHistorySession,
       readProjectReturnMemory,
@@ -3578,7 +3629,17 @@ export default function App({
         saved,
       ]);
       setCreateProjectOpen(false);
-      switchAgentProject(saved);
+      if (saved.goal.trim()) {
+        setAgentProjectsViewOpen(true);
+        await startProjectAgentRef.current(
+          saved,
+          "coordinator",
+          coordinatorPrompt(saved),
+          saved.name,
+        );
+      } else {
+        switchAgentProject(saved);
+      }
     } catch (error: unknown) {
       void message(String(error), { title: "New project", kind: "error" });
     } finally {
@@ -3901,6 +3962,73 @@ export default function App({
       })();
     },
     [activeTabId],
+  );
+
+  const onOpenProjectDocument = useCallback(
+    (document: AgentProjectDocument) => {
+      const tab = tabsRef.current.find(
+        (entry) => entry.id === activeTabIdRef.current,
+      );
+      const projectId = activeProjectIdRef.current;
+      if (!tab || !projectId) return;
+      const file = newProjectDocumentTab(projectCwdRef.current, {
+        projectId,
+        documentId: document.id,
+        name: document.name,
+      });
+      setTabs((prev) =>
+        prev.map((entry) =>
+          entry.id === tab.id ? openEditorTab(entry, file) : entry,
+        ),
+      );
+      setComposerFocused(false);
+    },
+    [],
+  );
+
+  const onAssignSessionsToProject = useCallback(
+    async (sessionIds: readonly string[], projectId: string) => {
+      const project = agentProjectsRef.current.find(
+        (entry) => entry.id === projectId,
+      );
+      if (!project || project.archived) return;
+      try {
+        for (const sessionId of sessionIds) {
+          await assignSessionProject(sessionId, projectId);
+        }
+        setSessions((prev) =>
+          prev.map((session) =>
+            sessionIds.includes(session.id)
+              ? { ...session, projectId }
+              : session,
+          ),
+        );
+        const nextMembers = [
+          ...project.members.filter(
+            (member) => !sessionIds.includes(member.sessionId),
+          ),
+          ...sessionIds.map((sessionId) => {
+            const session = sessionsRef.current.find(
+              (entry) => entry.id === sessionId,
+            );
+            return {
+              sessionId,
+              role: "worker" as const,
+              title: session?.title || "Chat",
+            };
+          }),
+        ];
+        if (nextMembers.length > 64) {
+          throw new Error(
+            "This project has 64 linked agents. Unlink finished workers first.",
+          );
+        }
+        await saveAgentProject({ ...project, members: nextMembers });
+      } catch (error: unknown) {
+        void message(String(error), { title: "Projects", kind: "error" });
+      }
+    },
+    [],
   );
 
   const onOpenPlan = useCallback(
@@ -4576,6 +4704,15 @@ export default function App({
   );
 
   const startingProjectAgents = useRef(new Set<string>());
+  const startProjectAgentRef = useRef<
+    (
+      project: AgentProject,
+      role: "coordinator" | "worker",
+      prompt: string,
+      title: string,
+      subscription?: AgentProjectSubscription,
+    ) => Promise<void>
+  >(async () => {});
   const startProjectAgent = useCallback(
     async (
       project: AgentProject,
@@ -4655,7 +4792,7 @@ export default function App({
           // existing coordinator or inherit a user's full-access permissions.
           onSubmit(session.id, prompt, [], { followUpBehavior: "queue" });
         } else {
-          setAgentProjectsViewOpen(false);
+          setAgentProjectsViewOpen(true);
           setProjectCwd(session.cwd);
           setRecents(rememberProject(session.cwd));
           setSidebarTab("sessions");
@@ -4666,8 +4803,9 @@ export default function App({
         startingProjectAgents.current.delete(project.id);
       }
     },
-    [appendTab, ensureOpenSession, onSelectHistorySession, onSubmit],
+    [appendTab, ensureOpenSession, newTab, onSelectHistorySession, onSubmit],
   );
+  startProjectAgentRef.current = startProjectAgent;
 
   const runProjectSubscription = useCallback(
     (project: AgentProject, subscription: AgentProjectSubscription) =>
@@ -6006,6 +6144,7 @@ export default function App({
         onCancelReminders={sessionReminders.cancel}
         onDeleteSession={onDeleteHistorySession}
         onDeleteSessions={onDeleteHistorySessions}
+        onAssignSessionsToProject={onAssignSessionsToProject}
         onOpenFile={onOpenFile}
         onOpenTerminal={onOpenTerminal}
         onFileMoved={onFileMoved}
@@ -6111,8 +6250,7 @@ export default function App({
             searchViewOpen ||
             settingsOpen ||
             inboxViewOpen ||
-            notesViewOpen ||
-            agentProjectsViewOpen
+            notesViewOpen
               ? "hidden"
               : "flex min-h-0 min-w-0 flex-1 flex-col"
           }
@@ -6120,15 +6258,13 @@ export default function App({
             searchViewOpen ||
             settingsOpen ||
             inboxViewOpen ||
-            notesViewOpen ||
-            agentProjectsViewOpen
+            notesViewOpen
           }
           inert={
             searchViewOpen ||
             settingsOpen ||
             inboxViewOpen ||
             notesViewOpen ||
-            agentProjectsViewOpen ||
             undefined
           }
         >
@@ -6176,6 +6312,12 @@ export default function App({
             projectTerminalActive={
               !!currentProjectDock && currentProjectDock.pane.files.length > 0
             }
+            onToggleProjectPane={
+              activeProjectId
+                ? () => setAgentProjectsViewOpen((open) => !open)
+                : undefined
+            }
+            projectPaneActive={agentProjectsViewOpen}
             onOpenSettings={onOpenSettings}
             onOpenInbox={onOpenInbox}
             onOpenNotes={notesEnabled ? onOpenNotes : undefined}
@@ -6283,6 +6425,46 @@ export default function App({
                     </div>
                   ))}
                 </div>
+                {agentProjectsViewOpen && activeProjectId ? (
+                  <div
+                    ref={projectPaneResize.setPaneRef}
+                    className="relative flex h-full min-h-0 shrink-0 flex-col"
+                    style={{ width: projectPaneResize.width }}
+                  >
+                    <div
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label="Resize project pane"
+                      onPointerDown={projectPaneResize.onPointerDown}
+                      className="absolute inset-y-0 left-0 z-10 w-1 cursor-col-resize hover:bg-accent/40"
+                    />
+                    <AgentProjectsView
+                      cwd={projectCwd}
+                      activeProjectId={activeProjectId}
+                      variant="pane"
+                      besideRail={projectRailOpen}
+                      onClose={() => setAgentProjectsViewOpen(false)}
+                      sessions={[...history, ...openProjectSessions]}
+                      busySessionIds={busySessionIds}
+                      onOpenSession={(id) => {
+                        void ensureOpenSession(id)
+                          .then(async (session) => {
+                            if (session) await onSelectHistorySession(id);
+                          })
+                          .catch((error: unknown) => {
+                            void message(String(error), {
+                              title: "Projects",
+                              kind: "error",
+                            });
+                          });
+                      }}
+                      onOpenDocument={(document) =>
+                        onOpenProjectDocument(document)
+                      }
+                      onStartSession={startProjectAgent}
+                    />
+                  </div>
+                ) : null}
               </div>
             </div>
           </main>
@@ -6343,37 +6525,7 @@ export default function App({
             onOpenIntegrations={onOpenInboxIntegrations}
           />
         ) : null}
-        {agentProjectsViewOpen ? (
-          <AgentProjectsView
-            cwd={projectCwd}
-            activeProjectId={activeProjectId}
-            besideRail={projectRailOpen}
-            onClose={() => setAgentProjectsViewOpen(false)}
-            onToggleSidebar={onToggleSidebar}
-            sessions={[...history, ...openProjectSessions]}
-            busySessionIds={busySessionIds}
-            onOpenSession={(id) => {
-              void ensureOpenSession(id)
-                .then(async (session) => {
-                  if (session) {
-                    await onSelectHistorySession(id);
-                  } else {
-                    await message(
-                      "This conversation is no longer available. Start the coordinator again, or delegate a new task.",
-                      { title: "Projects" },
-                    );
-                  }
-                })
-                .catch((error: unknown) => {
-                  void message(String(error), {
-                    title: "Projects",
-                    kind: "error",
-                  });
-                });
-            }}
-            onStartSession={startProjectAgent}
-          />
-        ) : null}
+
         {notesViewOpen ? (
           <NotesView
             besideRail={projectRailOpen}
@@ -6403,7 +6555,6 @@ export default function App({
         {searchViewOpen ||
         inboxViewOpen ||
         notesViewOpen ||
-        agentProjectsViewOpen ||
         settingsOpen ? null : (
           <UsageFooter
             providers={usageProviders}
@@ -6418,7 +6569,7 @@ export default function App({
       {createProjectOpen ? (
         <Modal
           title="New project"
-          description="Name the body of work. The current repository stays connected; you can start another project in the same checkout."
+          description="Name it, say what you want built, and you land in the coordinator chat."
           size="sm"
           onClose={() => {
             if (!createProjectBusy) setCreateProjectOpen(false);
@@ -6445,13 +6596,13 @@ export default function App({
               />
             </label>
             <label className="flex flex-col gap-1.5 text-xs font-medium text-content/65">
-              Goal
+              What should we build?
               <textarea
                 value={createProjectGoal}
                 disabled={createProjectBusy}
                 onChange={(event) => setCreateProjectGoal(event.target.value)}
                 className="min-h-24 rounded-lg border border-content/15 bg-background-base px-3 py-2 text-sm text-content"
-                placeholder="What outcome are you working toward? (optional)"
+                placeholder="The first message to the coordinator. Leave empty for a plain workspace."
               />
             </label>
             <p className="truncate font-mono text-[11px] text-content/40">

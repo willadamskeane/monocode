@@ -9,6 +9,7 @@ import {
   createAgentProject,
   deleteAgentProject,
   deleteAgentProjectsForCwd,
+  coordinatorPrompt,
   isWorkspaceProject,
   loadAgentProjects,
   saveAgentProject,
@@ -49,6 +50,13 @@ describe("agent project persistence", () => {
     expect(isWorkspaceProject(project({ goal: "  ", members: [] }))).toBe(true);
     expect(isWorkspaceProject(project({ legacyDefault: true }))).toBe(false);
     expect(isWorkspaceProject(project())).toBe(false);
+  });
+
+  it("uses the goal as the coordinator's first message", () => {
+    expect(coordinatorPrompt(project())).toBe("Ship it");
+    expect(coordinatorPrompt(project({ goal: "  " }))).toBe(
+      "Help coordinate Feature.",
+    );
   });
 
   it("creates an unsaved UUID project and leaves timestamps to native", () => {
